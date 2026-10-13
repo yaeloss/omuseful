@@ -111,8 +111,8 @@ class SetupController:
         network: Network,
         provision: Callable[[Credentials, Callable[[Callable[[], bool]], bool]], None],
         on_complete: Callable[[], None] = lambda: None,
-        on_confirmation_required: Callable[[], None] = lambda: None,
-        on_confirmation_ended: Callable[[bool], None] = lambda confirmed: None,
+        on_confirmation_required: Callable[[int], None] = lambda generation: None,
+        on_confirmation_ended: Callable[[int, bool], None] = lambda generation, confirmed: None,
         confirm_timeout_s: float = BUTTON_CONFIRM_TIMEOUT_S,
     ) -> None:
         self._pairing = pairing
@@ -199,10 +199,14 @@ class SetupController:
             previous.cancel()
         timer.start()
         log.info("waiting for confirmation on this computer")
-        self._on_confirmation_required()
+        self._on_confirmation_required(generation)
 
     def _claim_confirmation(self, generation: int = 0) -> tuple[int, threading.Timer | None]:
-        """Take the pending prompt so only one of confirm/timeout/cancel acts."""
+        """Take the pending prompt so only one of confirm/timeout/cancel acts.
+
+        With ``generation``, only that exact prompt is taken; without it,
+        whichever prompt is pending (used when its session ends).
+        """
         with self._state_lock:
             pending = self._confirm_generation
             if not pending or (generation and generation != pending):
@@ -218,7 +222,7 @@ class SetupController:
         if timer is not None:
             timer.cancel()
         if generation:
-            self._on_confirmation_ended(False)
+            self._on_confirmation_ended(generation, False)
 
     def _confirmation_timed_out(self, generation: int, peer: str) -> None:
         claimed, _ = self._claim_confirmation(generation)
@@ -226,7 +230,7 @@ class SetupController:
             return
         log.warning("pairing was not confirmed in time")
         self.send_status("pairing_confirm_timeout", generation)
-        self._on_confirmation_ended(False)
+        self._on_confirmation_ended(generation, False)
         if self._pairing.reset_if_current(generation):
             self._transport.disconnect(DISCONNECT_AFTER_ERROR_S, peer)
 
@@ -328,15 +332,22 @@ class SetupController:
         if self._pairing.awaiting_confirmation(generation):
             self._await_confirmation(generation)
 
-    def confirm(self) -> bool:
-        """Confirm the prompted session; the person at this computer pressed Enter."""
-        generation, timer = self._claim_confirmation()
+    def confirm(self, generation: int) -> bool:
+        """Confirm one prompted session; the person at this computer pressed Enter.
+
+        ``generation`` is the one passed to ``on_confirmation_required`` for
+        the prompt that was showing. A press meant for a session that has
+        since ended or been replaced is refused, never applied to another.
+        """
         if not generation:
+            return False
+        claimed, timer = self._claim_confirmation(generation)
+        if not claimed:
             return False
         if timer is not None:
             timer.cancel()
-        confirmed = self._pairing.confirm(generation)
-        self._on_confirmation_ended(bool(confirmed))
+        confirmed = self._pairing.confirm(claimed)
+        self._on_confirmation_ended(claimed, bool(confirmed))
         if not confirmed:
             return False
         log.info("pairing confirmed on this computer")

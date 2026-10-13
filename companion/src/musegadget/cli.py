@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import select
 import sys
 import termios
@@ -34,11 +35,83 @@ log = logging.getLogger("musegadget")
 
 DEFAULT_SETUP_WINDOW_S = 600
 BLE_SHUTDOWN_DELAY_S = 1.5
+CONFIRM_POLL_S = 0.2
 
 
 class _SystemNetwork:
     is_online = staticmethod(network.is_online)
     current_connection_entry = staticmethod(network.current_connection_entry)
+
+
+class _TerminalConfirmation:
+    """Turns Enter in the pairing terminal into confirmation of one session.
+
+    One reader serves every prompt, so no waiter outlives the prompt it was
+    started for. A press counts only for the prompt that was showing before
+    it was typed and is still showing once it is read, and the controller
+    then accepts it only for that prompt's own session generation.
+    """
+
+    def __init__(self, fd: int, confirm: Callable[[int], bool]) -> None:
+        self._fd = fd
+        self._confirm = confirm
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._read, name="pair-confirm", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    def prompt(self, generation: int) -> None:
+        try:
+            # Keys typed before the prompt must not count as confirming it.
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+        except (OSError, termios.error):
+            pass
+        with self._lock:
+            self._generation = generation
+        print(f"\nA phone asked to pair. If the Muse app on your phone is asking you to "
+              f"confirm on the device, press Enter here within {BUTTON_CONFIRM_TIMEOUT_S} "
+              "seconds. If it isn't, press nothing.", flush=True)
+
+    def ended(self, generation: int, confirmed: bool) -> None:
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._generation = 0
+        print("Confirmed. Finish setup in the Muse app." if confirmed
+              else "That pairing request ended without being confirmed.", flush=True)
+
+    def _showing(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def _read(self) -> None:
+        while not self._stopped.is_set():
+            shown = self._showing()
+            try:
+                ready, _, _ = select.select([self._fd], [], [], CONFIRM_POLL_S)
+                if not ready:
+                    continue
+                data = os.read(self._fd, 1024)
+            except OSError:
+                return
+            if not data:
+                return
+            self._press(shown, data)
+
+    def _press(self, shown: int, data: bytes) -> None:
+        if b"\n" not in data and b"\r" not in data:
+            return
+        current = self._showing()
+        if shown and shown == current:
+            self._confirm(shown)
+        elif current:
+            print("Press Enter again to confirm the request shown above.", flush=True)
 
 
 def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bool]], bool]) -> None:
@@ -85,6 +158,10 @@ def cmd_pair(args: argparse.Namespace) -> int:
     if not sdk_token:
         print("No SDK token yet. Add one first: `bash omuseful-token.sh`.", file=sys.stderr)
         return 1
+    if sys.stdin is None or not sys.stdin.isatty():
+        print("Run pairing in a terminal: you confirm it there by pressing Enter.",
+              file=sys.stderr)
+        return 1
     from musegadget.ble_server import BleServer
 
     ident = identity.load_or_create()
@@ -95,8 +172,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         firmware_version=__version__,
     )
     completed = threading.Event()
-    pairing_stopped = threading.Event()
     controller: SetupController | None = None
+    terminal: _TerminalConfirmation | None = None
 
     server = BleServer(
         ident.ble_name,
@@ -106,38 +183,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
 
     def finish() -> None:
         completed.set()
-        pairing_stopped.set()
         threading.Timer(BLE_SHUTDOWN_DELAY_S, server.stop).start()
 
-    def confirmation_ended(confirmed: bool) -> None:
-        print("Confirmed. Finish setup in the Muse app." if confirmed
-              else "That pairing request ended without being confirmed.", flush=True)
-
-    def request_confirmation() -> None:
-        try:
-            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-        except (AttributeError, OSError, termios.error, ValueError):
-            pass
-        print(f"\nA phone asked to pair. If the Muse app on your phone is asking you to "
-              f"confirm on the device, press Enter here within {BUTTON_CONFIRM_TIMEOUT_S} "
-              "seconds. If it isn't, press nothing.", flush=True)
-
-        def wait_for_confirmation() -> None:
-            try:
-                deadline = time.monotonic() + BUTTON_CONFIRM_TIMEOUT_S
-                while not pairing_stopped.is_set() and time.monotonic() < deadline:
-                    ready, _, _ = select.select(
-                        [sys.stdin], [], [], max(0, deadline - time.monotonic()),
-                    )
-                    if ready:
-                        if sys.stdin.readline() and controller is not None:
-                            controller.confirm()
-                        return
-            except (OSError, ValueError, EOFError):
-                pass
-
-        threading.Thread(target=wait_for_confirmation, name="pair-confirm", daemon=True).start()
-
+    terminal = _TerminalConfirmation(
+        sys.stdin.fileno(), lambda generation: controller.confirm(generation),
+    )
     controller = SetupController(
         pairing=pairing,
         identity=ident,
@@ -146,8 +196,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         network=_SystemNetwork(),
         provision=_verify_and_save,
         on_complete=finish,
-        on_confirmation_required=request_confirmation,
-        on_confirmation_ended=confirmation_ended,
+        on_confirmation_required=terminal.prompt,
+        on_confirmation_ended=terminal.ended,
     )
     window = threading.Timer(args.timeout, server.stop)
     window.daemon = True
@@ -155,6 +205,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
     print(f"Setup open for {args.timeout // 60} minutes. In the Muse app, add a device")
     print(f"and choose {ident.ble_name}.")
     controller.start()
+    terminal.start()
     window.start()
     pairing_marker = None
     try:
@@ -172,7 +223,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        pairing_stopped.set()
+        terminal.stop()
         window.cancel()
         controller.stop()
         if pairing_marker is not None:

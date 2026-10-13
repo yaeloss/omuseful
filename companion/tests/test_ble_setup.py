@@ -77,10 +77,14 @@ class Harness:
         self.pairing = make_device(clock=clock) if clock else make_device()
         self.saved: list = []
         self.completed = threading.Event()
+        self.confirmation_generation = 0
 
         def default_provision(credentials, commit):
             if not commit(lambda: self.saved.append(credentials) or True):
                 raise ProvisionFailed("error_storage")
+
+        def request_confirmation(generation):
+            self.confirmation_generation = generation
 
         self.controller = SetupController(
             pairing=self.pairing,
@@ -90,6 +94,7 @@ class Harness:
             network=self.network,
             provision=provision or default_provision,
             on_complete=self.completed.set,
+            on_confirmation_required=request_confirmation,
             confirm_timeout_s=confirm_timeout_s,
         )
         self.mobile = Mobile(APP)
@@ -103,7 +108,7 @@ class Harness:
     def pair(self) -> None:
         self.send(hello())
         self.send(client_finished_record())
-        assert self.controller.confirm()
+        assert self.controller.confirm(self.confirmation_generation)
         self.mobile.tx_counter = 1
 
     def opened(self) -> list:
@@ -207,8 +212,21 @@ def test_invalid_hello_cannot_cancel_local_confirmation():
     h.send(client_finished_record())
     h.wait_for_status("confirm_required")
     h.send(hello(pairing_policy="confirm_app"))
-    assert h.controller.confirm()
+    assert h.controller.confirm(h.confirmation_generation)
     assert h.pairing.confirmed
+
+
+def test_stale_confirmation_generation_cannot_confirm_a_replacement():
+    h = Harness()
+    h.send(hello())
+    h.send(client_finished_record())
+    old_generation = h.confirmation_generation
+    h.send(hello())
+    h.send(client_finished_record())
+    new_generation = h.confirmation_generation
+    assert new_generation != old_generation
+    assert not h.controller.confirm(old_generation)
+    assert h.controller.confirm(new_generation)
 
 
 def test_confirmation_timeout_clears_the_session():
@@ -221,7 +239,7 @@ def test_confirmation_timeout_clears_the_session():
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert h.pairing.state is PairingState.IDLE
-    assert not h.controller.confirm()
+    assert not h.controller.confirm(h.confirmation_generation)
 
 
 def test_device_info_is_answered_mid_session_and_a_new_hello_restarts():
