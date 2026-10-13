@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musegadget"
-version = "0.1.0"
+version = "0.1.2"
 description = "Make any Linux computer into a Muse Home Link that pairs with the Muse app"
 readme = "README.md"
 license = "Apache-2.0"
