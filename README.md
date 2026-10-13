@@ -9,7 +9,7 @@ replies. **Nothing runs on this computer on Muse's behalf.**
 
 Omuseful is possible because Meta published the Muse gadget SDK as open source (Apache-2.0). The companion in companion/ is the SDK’s Linux device, trimmed to chat only. 
 
-**Thanks to the Muse team for opening it up to the community.***
+**Thanks to the Muse team for opening it up to the community.**
 
 > Independent community project, not made or endorsed by Meta or Omarchy.
 
