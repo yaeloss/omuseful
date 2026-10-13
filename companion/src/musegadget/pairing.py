@@ -15,13 +15,17 @@
 """Device side of Muse Gadget BLE pairing, protocol version 5.
 
 Community mode only: ``pairing_auth`` is ``"none"`` (no manufacturer proof)
-and the policy is ``confirm_app``, so a valid client-finished record confirms
-the session without a physical button. The wire format, transcript, key
-schedule and record encryption match the ESP32 reference firmware so the
-existing Muse apps pair with it unchanged.
+and the policy is ``confirm_press``, as on the ESP32 reference firmware. A
+valid client-finished record only asks for confirmation; the session is
+confirmed when the person at this computer presses Enter where
+``musegadget pair`` runs (the firmware's button press). The wire format,
+transcript, key schedule and record encryption match the ESP32 reference
+firmware so the existing Muse apps pair with it unchanged.
 
 Community pairing protects setup secrets from passive observers. It does not
 authenticate the ECDH peer, so it cannot stop an active man-in-the-middle.
+For that reason the SDK token is never sent over Bluetooth: the service
+reports it to Muse itself, over HTTPS.
 """
 
 from __future__ import annotations
@@ -84,6 +88,7 @@ class PairingError(Exception):
 class PairingState(enum.Enum):
     IDLE = "idle"
     WAIT_CLIENT_FINISHED = "wait_client_finished"
+    CONFIRM_REQUIRED = "confirm_required"
     READY = "ready"
     PROVISIONING = "provisioning"
 
@@ -213,13 +218,11 @@ class PairingSession:
         device_id: str,
         mac: str,
         firmware_version: str,
-        sdk_token: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         generate_key: Callable[[], ec.EllipticCurvePrivateKey] = _generate_device_key,
         random_bytes: Callable[[int], bytes] = os.urandom,
     ) -> None:
         self._node_id = node_id
-        self._sdk_token = sdk_token
         self._device_id = device_id
         self._mac = mac
         self._firmware_version = firmware_version or "unknown"
@@ -239,7 +242,7 @@ class PairingSession:
             "pairing_protocol": PAIRING_VERSION,
             "pairing_auth": AUTH_COMMUNITY,
             "pairing_auth_epoch": 0,
-            "pairing_policy": POLICY_APP,
+            "pairing_policy": POLICY_BUTTON,
         }
 
     @property
@@ -268,7 +271,7 @@ class PairingSession:
             or not isinstance(version, (int, float))
             or version != PAIRING_VERSION
             or message.get("pairing_auth") != AUTH_COMMUNITY
-            or message.get("pairing_policy") != POLICY_APP
+            or message.get("pairing_policy") != POLICY_BUTTON
         ):
             raise PairingError(ERROR_INVALID_HELLO)
 
@@ -299,7 +302,7 @@ class PairingSession:
             transcript = build_transcript(
                 community=True,
                 auth_epoch=0,
-                policy=POLICY_APP,
+                policy=POLICY_BUTTON,
                 device_id=self._device_id,
                 node_id=self._node_id,
                 mac=self._mac,
@@ -332,7 +335,7 @@ class PairingSession:
                 "firmware_version": self._firmware_version,
                 "pairing_auth": AUTH_COMMUNITY,
                 "pairing_auth_epoch": 0,
-                "pairing_policy": POLICY_APP,
+                "pairing_policy": POLICY_BUTTON,
                 "device_pub": b64url_encode(device_pub),
                 "device_nonce": b64url_encode(device_nonce),
                 "transcript_hash": b64url_encode(transcript_hash),
@@ -373,12 +376,12 @@ class PairingSession:
             return plaintext
 
     def handle_client_finished(self, command: dict) -> int:
-        """Confirm the session after the first decrypted record.
+        """Request local confirmation after the first decrypted record.
 
         ``command`` must be exactly ``{"action": "pairing_client_finished"}``
-        and must have been the first record. Under ``confirm_app`` the app
-        already collected consent, so this confirms directly. Returns the new
-        generation, or 0 (after clearing the session) if the record is invalid.
+        and must have been the first record. Returns the new generation in
+        ``CONFIRM_REQUIRED``, or 0 (after clearing the session) if the record
+        is invalid.
         """
         with self._lock:
             ok = (
@@ -391,9 +394,50 @@ class PairingSession:
                 self._reset_locked()
                 return 0
             self._advance_generation_locked()
+            self._state = PairingState.CONFIRM_REQUIRED
+            self._deadline = self._clock() + BUTTON_CONFIRM_TIMEOUT_S
+            return self._generation
+
+    def awaiting_confirmation(self, generation: int) -> bool:
+        with self._lock:
+            return (
+                generation != 0
+                and generation == self._generation
+                and not self._expire_locked()
+                and self._state is PairingState.CONFIRM_REQUIRED
+            )
+
+    def confirm(self, generation: int) -> int:
+        """Confirm the session the person at this computer was asked about.
+
+        This is the firmware's button press. ``generation`` is the one
+        :meth:`handle_client_finished` returned for the prompt shown. Returns
+        the new generation, or 0 if that session is no longer waiting.
+        """
+        with self._lock:
+            if (
+                generation == 0
+                or generation != self._generation
+                or self._expire_locked()
+                or self._state is not PairingState.CONFIRM_REQUIRED
+            ):
+                return 0
+            self._advance_generation_locked()
             self._state = PairingState.READY
             self._deadline = self._clock() + CONFIRMED_TIMEOUT_S
             return self._generation
+
+    def reset_if_current(self, generation: int) -> bool:
+        """Clear the session if ``generation`` still names it.
+
+        Expiry keeps the generation, so this also catches a session that
+        timed out on its own; confirming or replacing it does not.
+        """
+        with self._lock:
+            if generation == 0 or generation != self._generation:
+                return False
+            self._reset_locked()
+            return True
 
     def mark_provisioning(self) -> int:
         """Enter provisioning from a confirmed session; returns its generation."""
@@ -450,11 +494,9 @@ class PairingSession:
             }
 
     def encrypt_status(self, status: str, generation: int = 0) -> dict | None:
-        message = {"type": "status", "status": status}
-        # Apps read only type and status, so older ones ignore the token.
-        if self._sdk_token and status == "pairing_confirmed":
-            message["sdk_token"] = self._sdk_token
-        plaintext = json.dumps(message, separators=(",", ":"))
+        plaintext = json.dumps(
+            {"type": "status", "status": status}, separators=(",", ":"),
+        )
         return self.encrypt_json(plaintext, generation)
 
     def _provisioning_locked(self, generation: int) -> bool:

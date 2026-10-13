@@ -36,10 +36,10 @@ class FakeTransport:
         self._assembler = ChunkAssembler()
         self._lock = threading.Lock()
 
-    def mtu(self) -> int:
+    def mtu(self, peer: str = "") -> int:
         return self._mtu
 
-    def send_packets(self, packets: list[bytes]) -> None:
+    def send_packets(self, packets: list[bytes], peer: str = "") -> None:
         with self._lock:
             for packet in packets:
                 assert len(packet) <= max(self._mtu - 3, 20)
@@ -51,7 +51,7 @@ class FakeTransport:
                 else:
                     self.messages.append(message.decode())
 
-    def disconnect(self, delay: float) -> None:
+    def disconnect(self, delay: float, peer: str = "") -> None:
         self.disconnects.append(delay)
 
 
@@ -70,10 +70,11 @@ IDENTITY = Identity(APP["mac"])
 
 
 class Harness:
-    def __init__(self, online: bool = True, provision=None, mtu: int = 185) -> None:
+    def __init__(self, online: bool = True, provision=None, mtu: int = 185,
+                 confirm_timeout_s: float = 60, clock=None) -> None:
         self.transport = FakeTransport(mtu)
         self.network = FakeNetwork(online)
-        self.pairing = make_device()
+        self.pairing = make_device(clock=clock) if clock else make_device()
         self.saved: list = []
         self.completed = threading.Event()
 
@@ -89,6 +90,7 @@ class Harness:
             network=self.network,
             provision=provision or default_provision,
             on_complete=self.completed.set,
+            confirm_timeout_s=confirm_timeout_s,
         )
         self.mobile = Mobile(APP)
 
@@ -101,6 +103,7 @@ class Harness:
     def pair(self) -> None:
         self.send(hello())
         self.send(client_finished_record())
+        assert self.controller.confirm()
         self.mobile.tx_counter = 1
 
     def opened(self) -> list:
@@ -140,7 +143,7 @@ def test_device_info_matches_the_pairing_transcript_fields():
     assert info["model"] == "hatch_link"
     assert info["pairing_protocol"] == 5
     assert info["pairing_auth"] == "none"
-    assert info["pairing_policy"] == "confirm_app"
+    assert info["pairing_policy"] == "confirm_press"
     assert info["network_ready"] is True
 
 
@@ -155,7 +158,7 @@ def test_hello_returns_pairing_ready_in_chunks_at_minimum_mtu():
 def test_full_setup_flow():
     h = Harness()
     h.pair()
-    assert h.statuses() == ["pairing_confirmed"]
+    assert h.statuses() == ["confirm_required", "pairing_confirmed"]
 
     h.send_encrypted({"action": "wifi_scan"})
     scan = h.opened()[-1]
@@ -164,7 +167,7 @@ def test_full_setup_flow():
 
     h.send_encrypted(PROVISION)
     h.wait_for_status("auth_ok")
-    assert h.statuses() == ["pairing_confirmed", "wifi_connecting", "wifi_connected", "auth_ok"]
+    assert h.statuses() == ["confirm_required", "pairing_confirmed", "wifi_connecting", "wifi_connected", "auth_ok"]
     assert h.completed.is_set()
     saved = h.saved[0]
     assert (saved.access_token, saved.refresh_token, saved.username) == (
@@ -188,6 +191,39 @@ def test_plaintext_is_ignored_once_pairing_starts():
     assert len(h.transport.messages) == 1
 
 
+def test_second_ble_peer_cannot_replace_the_active_session():
+    h = Harness()
+    raw = json.dumps(hello()).encode()
+    h.controller.handle_message(raw, peer="peer-a")
+    h.controller.on_write(raw, peer="peer-b")
+    assert h.pairing.state is PairingState.WAIT_CLIENT_FINISHED
+    assert h.transport.disconnects == [0]
+    assert len(h.transport.messages) == 1
+
+
+def test_invalid_hello_cannot_cancel_local_confirmation():
+    h = Harness()
+    h.send(hello())
+    h.send(client_finished_record())
+    h.wait_for_status("confirm_required")
+    h.send(hello(pairing_policy="confirm_app"))
+    assert h.controller.confirm()
+    assert h.pairing.confirmed
+
+
+def test_confirmation_timeout_clears_the_session():
+    h = Harness(confirm_timeout_s=0.01, clock=time.monotonic)
+    h.send(hello())
+    h.send(client_finished_record())
+    h.wait_for_status("confirm_required")
+    deadline = time.monotonic() + 2
+    while not h.transport.disconnects:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert h.pairing.state is PairingState.IDLE
+    assert not h.controller.confirm()
+
+
 def test_device_info_is_answered_mid_session_and_a_new_hello_restarts():
     h = Harness()
     h.pair()
@@ -201,7 +237,7 @@ def test_device_info_is_answered_mid_session_and_a_new_hello_restarts():
 
 def test_bad_hello_gets_a_plaintext_error():
     h = Harness()
-    h.send(hello(pairing_policy="confirm_press"))
+    h.send(hello(pairing_policy="confirm_app"))
     assert h.transport.messages == ["error_pairing_invalid_hello"]
 
 

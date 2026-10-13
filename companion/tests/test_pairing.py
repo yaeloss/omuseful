@@ -29,7 +29,7 @@ from musegadget.pairing import PairingError, PairingSession, PairingState
 VECTORS = json.loads(
     (Path(__file__).parent / "vectors" / "link_pairing_v5.json").read_text()
 )["vectors"]
-APP = next(v for v in VECTORS if v["name"] == "community_app_v5")
+APP = next(v for v in VECTORS if v["name"] == "community_v5")
 
 
 def b64(data: bytes) -> str:
@@ -91,7 +91,7 @@ class Mobile:
 
 
 def make_device(
-    vector: dict = APP, clock: FakeClock | None = None, sdk_token: str | None = None,
+    vector: dict = APP, clock: FakeClock | None = None,
 ) -> PairingSession:
     scalar = int(vector["device_private_scalar_hex"], 16)
     return PairingSession(
@@ -99,7 +99,6 @@ def make_device(
         device_id=vector["device_id"],
         mac=vector["mac"],
         firmware_version=vector["firmware_version"],
-        sdk_token=sdk_token,
         clock=clock or FakeClock(),
         generate_key=lambda: ec.derive_private_key(scalar, ec.SECP256R1()),
         random_bytes=lambda n: unb64(vector["device_nonce"]),
@@ -111,7 +110,7 @@ def hello(vector: dict = APP, **overrides) -> dict:
         "action": "pairing_client_hello",
         "version": 5,
         "pairing_auth": "none",
-        "pairing_policy": "confirm_app",
+        "pairing_policy": "confirm_press",
         "mobile_pub": vector["mobile_pub"],
         "mobile_nonce": vector["mobile_nonce"],
     }
@@ -133,7 +132,8 @@ def confirmed_device(clock: FakeClock | None = None) -> tuple[PairingSession, Mo
     device = make_device(clock=clock)
     device.handle_hello(hello())
     command = json.loads(device.decrypt(client_finished_record()))
-    generation = device.handle_client_finished(command)
+    pending = device.handle_client_finished(command)
+    generation = device.confirm(pending)
     mobile = Mobile(APP)
     mobile.tx_counter = 1
     return device, mobile, generation
@@ -183,7 +183,7 @@ def test_transcript_rejects_app_policy_for_official_devices():
         )
 
 
-def test_device_info_advertises_community_app_confirmation():
+def test_device_info_advertises_local_confirmation():
     info = make_device().device_info()
     assert info == {
         "device_id": APP["device_id"],
@@ -192,7 +192,7 @@ def test_device_info_advertises_community_app_confirmation():
         "pairing_protocol": 5,
         "pairing_auth": "none",
         "pairing_auth_epoch": 0,
-        "pairing_policy": "confirm_app",
+        "pairing_policy": "confirm_press",
     }
 
 
@@ -208,12 +208,21 @@ def test_hello_produces_the_vector_pairing_ready():
         "firmware_version": APP["firmware_version"],
         "pairing_auth": "none",
         "pairing_auth_epoch": 0,
-        "pairing_policy": "confirm_app",
+        "pairing_policy": "confirm_press",
         "device_pub": APP["device_pub"],
         "device_nonce": APP["device_nonce"],
         "transcript_hash": APP["transcript_hash"],
         "session_id": APP["session_id"],
     }
+
+
+def test_local_confirmation_is_required_before_the_session_is_confirmed():
+    device = make_device()
+    device.handle_hello(hello())
+    pending = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
+    assert pending and device.state is PairingState.CONFIRM_REQUIRED
+    assert not device.confirmed
+    assert device.confirm(pending) and device.confirmed
 
 
 def test_full_app_confirmed_handshake():
@@ -224,11 +233,15 @@ def test_full_app_confirmed_handshake():
     plaintext = device.decrypt(client_finished_record())
     assert plaintext == APP["client_finished_plaintext"]
 
-    generation = device.handle_client_finished(json.loads(plaintext))
-    assert generation
-    assert device.confirmed
+    pending_generation = device.handle_client_finished(json.loads(plaintext))
+    assert pending_generation
+    assert device.state is PairingState.CONFIRM_REQUIRED
 
     mobile = Mobile(APP)
+    prompt = mobile.open(device.encrypt_status("confirm_required", pending_generation))
+    assert prompt == {"type": "status", "status": "confirm_required"}
+    generation = device.confirm(pending_generation)
+    assert generation and device.confirmed
     confirmed = mobile.open(device.encrypt_status("pairing_confirmed", generation))
     assert confirmed == {"type": "status", "status": "pairing_confirmed"}
 
@@ -236,14 +249,17 @@ def test_full_app_confirmed_handshake():
     assert json.loads(scan) == {"action": "wifi_scan"}
 
 
-def test_pairing_confirmed_carries_the_sdk_token():
-    token = "mgst_" + "A" * 43
-    device = make_device(sdk_token=token)
+def test_pairing_status_never_carries_an_sdk_token():
+    device = make_device()
     device.handle_hello(hello())
-    generation = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
+    pending = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
     mobile = Mobile(APP)
+    assert mobile.open(device.encrypt_status("confirm_required", pending)) == {
+        "type": "status", "status": "confirm_required",
+    }
+    generation = device.confirm(pending)
     assert mobile.open(device.encrypt_status("pairing_confirmed", generation)) == {
-        "type": "status", "status": "pairing_confirmed", "sdk_token": token,
+        "type": "status", "status": "pairing_confirmed",
     }
     assert mobile.open(device.encrypt_status("wifi_connecting", generation)) == {
         "type": "status", "status": "wifi_connecting",
@@ -268,7 +284,7 @@ def test_device_records_count_up_from_zero():
         {"version": "5"},
         {"version": True},
         {"pairing_auth": "fleet_ecdsa_p256_v1"},
-        {"pairing_policy": "confirm_press"},
+        {"pairing_policy": "confirm_app"},
         {"pairing_policy": None},
         {"mobile_pub": ""},
         {"mobile_pub": b64(b"\x04" + b"\0" * 64)},
@@ -385,6 +401,17 @@ def test_client_finished_times_out_after_60_seconds():
     device.handle_hello(hello())
     clock.now += 60.5
     expect_decrypt_failure(device, client_finished_record())
+
+
+def test_confirmation_expires_without_local_confirmation():
+    clock = FakeClock()
+    device = make_device(clock=clock)
+    device.handle_hello(hello())
+    pending = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
+    clock.now += 60.5
+    assert device.reset_if_current(pending)
+    assert device.state is PairingState.IDLE
+    assert not device.confirm(pending)
 
 
 def test_confirmed_session_expires_after_120_seconds():

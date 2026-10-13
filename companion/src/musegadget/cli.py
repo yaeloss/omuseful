@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import select
 import sys
+import termios
 import threading
 import time
 from typing import Callable
 
 from musegadget import __version__, config, identity, muse_api, network
 from musegadget.ble_setup import Credentials, ProvisionFailed, SetupController
-from musegadget.pairing import PairingSession
+from musegadget.pairing import BUTTON_CONFIRM_TIMEOUT_S, PairingSession
 
 log = logging.getLogger("musegadget")
 
@@ -91,20 +93,50 @@ def cmd_pair(args: argparse.Namespace) -> int:
         device_id=ident.device_id,
         mac=ident.mac,
         firmware_version=__version__,
-        sdk_token=sdk_token,
     )
     completed = threading.Event()
+    pairing_stopped = threading.Event()
     controller: SetupController | None = None
 
     server = BleServer(
         ident.ble_name,
-        on_write=lambda packet: controller.on_write(packet),
-        on_disconnect=lambda: controller.on_disconnect(),
+        on_write=lambda packet, peer: controller.on_write(packet, peer),
+        on_disconnect=lambda peer: controller.on_disconnect(peer),
     )
 
     def finish() -> None:
         completed.set()
+        pairing_stopped.set()
         threading.Timer(BLE_SHUTDOWN_DELAY_S, server.stop).start()
+
+    def confirmation_ended(confirmed: bool) -> None:
+        print("Confirmed. Finish setup in the Muse app." if confirmed
+              else "That pairing request ended without being confirmed.", flush=True)
+
+    def request_confirmation() -> None:
+        try:
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (AttributeError, OSError, termios.error, ValueError):
+            pass
+        print(f"\nA phone asked to pair. If the Muse app on your phone is asking you to "
+              f"confirm on the device, press Enter here within {BUTTON_CONFIRM_TIMEOUT_S} "
+              "seconds. If it isn't, press nothing.", flush=True)
+
+        def wait_for_confirmation() -> None:
+            try:
+                deadline = time.monotonic() + BUTTON_CONFIRM_TIMEOUT_S
+                while not pairing_stopped.is_set() and time.monotonic() < deadline:
+                    ready, _, _ = select.select(
+                        [sys.stdin], [], [], max(0, deadline - time.monotonic()),
+                    )
+                    if ready:
+                        if sys.stdin.readline() and controller is not None:
+                            controller.confirm()
+                        return
+            except (OSError, ValueError, EOFError):
+                pass
+
+        threading.Thread(target=wait_for_confirmation, name="pair-confirm", daemon=True).start()
 
     controller = SetupController(
         pairing=pairing,
@@ -114,6 +146,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         network=_SystemNetwork(),
         provision=_verify_and_save,
         on_complete=finish,
+        on_confirmation_required=request_confirmation,
+        on_confirmation_ended=confirmation_ended,
     )
     window = threading.Timer(args.timeout, server.stop)
     window.daemon = True
@@ -138,6 +172,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        pairing_stopped.set()
         window.cancel()
         controller.stop()
         if pairing_marker is not None:

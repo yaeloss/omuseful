@@ -386,7 +386,8 @@ Now add this computer in the Muse app on your phone:
   1. Settings > Devices > turn on Developer mode
   2. Tap Add Device (+) and choose the name shown below
   3. If asked for Wi-Fi, pick the network shown; no password is needed
-Keep this window open until it says Paired.
+Keep this window open. When it says a phone requested pairing, verify the
+Muse app and press Enter here to confirm; wait until it says Paired.
 
 EOF
     wait_for_bluetooth

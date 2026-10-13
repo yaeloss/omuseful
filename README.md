@@ -58,9 +58,11 @@ system settings.
 3. Click **Run setup**. A terminal opens: press Enter, type your password,
    and paste the token when asked (it stays hidden).
 4. Follow the on-screen steps to add this computer in the Muse app on your
-   phone. When it says **Paired**, you're done. Pair somewhere private:
-   Bluetooth pairing cannot prove it is really your phone against an active
-   attacker nearby (see [SECURITY.md](SECURITY.md#pairing)).
+   phone. When the terminal says a phone requested pairing, check the Muse app
+   and press Enter in that terminal to confirm. When it says **Paired**, you're
+   done. The SDK token never crosses Bluetooth, but pair somewhere private so
+   a nearby attacker cannot interfere with the session (see
+   [SECURITY.md](SECURITY.md#pairing)).
 
 Setup installs a small system service. Pairing is the only step that uses
 Bluetooth; chat then goes over the internet. To run it by hand instead:

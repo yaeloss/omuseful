@@ -261,7 +261,8 @@ def terminal_command(command: str) -> str:
     return "OMUSEFUL_TERMINAL=1 " + command
 TOKEN_URL = "https://gadgets.muse.ai/settings/sdk-tokens"
 PAIR_STEPS = ("In the Muse app: Settings → Devices → turn on Developer mode → Add Device (+), "
-              "then choose the MuseGadget name shown in the terminal.")
+              "then choose the MuseGadget name shown in the terminal. When the terminal says "
+              "a phone requested pairing, verify the app and press Enter there to confirm.")
 
 
 PAIR_COMMAND = "sudo musegadget pair"

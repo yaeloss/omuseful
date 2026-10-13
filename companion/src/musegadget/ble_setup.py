@@ -31,7 +31,11 @@ from typing import Callable, Protocol
 
 from musegadget.ble_framing import ChunkAssembler, encode_chunks
 from musegadget.identity import Identity
-from musegadget.pairing import PairingError, PairingSession
+from musegadget.pairing import (
+    BUTTON_CONFIRM_TIMEOUT_S,
+    PairingError,
+    PairingSession,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,12 +53,12 @@ DISCONNECT_AFTER_ERROR_S = 0.3
 
 
 class Transport(Protocol):
-    def send_packets(self, packets: list[bytes]) -> None:
+    def send_packets(self, packets: list[bytes], peer: str = "") -> None:
         """Notify each packet in order; blocks until all are queued."""
 
-    def mtu(self) -> int: ...
+    def mtu(self, peer: str = "") -> int: ...
 
-    def disconnect(self, delay: float) -> None: ...
+    def disconnect(self, delay: float, peer: str = "") -> None: ...
 
 
 class Network(Protocol):
@@ -88,6 +92,10 @@ def _compact(obj: dict) -> str:
 class SetupController:
     """Handles one BLE setup client at a time.
 
+    A device that writes first owns setup until it disconnects. Other devices
+    are refused, so they cannot reset, inject chunks into, or disconnect
+    another device's session.
+
     ``provision`` runs on its own thread with the saved credentials. It must
     verify them and persist them through ``commit`` (which runs under the
     pairing lock), raising :class:`ProvisionFailed` on failure.
@@ -103,6 +111,9 @@ class SetupController:
         network: Network,
         provision: Callable[[Credentials, Callable[[Callable[[], bool]], bool]], None],
         on_complete: Callable[[], None] = lambda: None,
+        on_confirmation_required: Callable[[], None] = lambda: None,
+        on_confirmation_ended: Callable[[bool], None] = lambda confirmed: None,
+        confirm_timeout_s: float = BUTTON_CONFIRM_TIMEOUT_S,
     ) -> None:
         self._pairing = pairing
         self._identity = identity
@@ -111,27 +122,56 @@ class SetupController:
         self._network = network
         self._provision = provision
         self._on_complete = on_complete
-        self._assembler = ChunkAssembler()
-        self._inbox: queue.Queue[bytes | None] = queue.Queue()
+        self._on_confirmation_required = on_confirmation_required
+        self._on_confirmation_ended = on_confirmation_ended
+        self._confirm_timeout_s = confirm_timeout_s
+        self._assemblers: dict[str, ChunkAssembler] = {}
+        self._peer = ""
+        self._inbox: queue.Queue[tuple[str, bytes] | None] = queue.Queue()
         self._tx_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._plaintext_blocked = False
         self._provisioning = False
+        self._confirm_generation = 0
+        self._confirm_timer: threading.Timer | None = None
         self._worker: threading.Thread | None = None
 
     # -- Transport callbacks (any thread) ---------------------------------------
 
-    def on_write(self, packet: bytes) -> None:
-        message = self._assembler.feed(packet)
-        if message is not None:
-            self._inbox.put(message)
-
-    def on_disconnect(self) -> None:
-        log.info("BLE client disconnected; clearing pairing session")
-        self._assembler.reset()
+    def on_write(self, packet: bytes, peer: str = "") -> None:
+        if not self._bind(peer):
+            log.warning("ignoring write from second BLE device %s during pairing", peer)
+            self._transport.disconnect(0, peer)
+            return
         with self._state_lock:
-            self._plaintext_blocked = False
+            assembler = self._assemblers.setdefault(peer, ChunkAssembler())
+            message = assembler.feed(packet)
+        if message is not None:
+            self._inbox.put((peer, message))
+
+    def on_disconnect(self, peer: str = "") -> None:
+        with self._state_lock:
+            self._assemblers.pop(peer, None)
+            ours = peer == self._peer
+            if ours:
+                self._peer = ""
+                self._plaintext_blocked = False
+        if not ours:
+            return
+        log.info("BLE client disconnected; clearing pairing session")
         self._pairing.reset()
+        self._end_confirmation()
+
+    def _bind(self, peer: str) -> bool:
+        """Reserve setup for the first connected device until it disconnects."""
+        with self._state_lock:
+            if peer == self._peer:
+                return True
+            if self._peer:
+                return False
+            self._peer = peer
+            self._plaintext_blocked = False
+            return True
 
     # -- Lifecycle --------------------------------------------------------------
 
@@ -140,18 +180,70 @@ class SetupController:
         self._worker.start()
 
     def stop(self) -> None:
+        self._end_confirmation()
         self._inbox.put(None)
 
+    # -- Local confirmation -------------------------------------------------------
+
+    def _await_confirmation(self, generation: int) -> None:
+        timer = threading.Timer(
+            self._confirm_timeout_s, self._confirmation_timed_out,
+            args=(generation, self._peer),
+        )
+        timer.daemon = True
+        with self._state_lock:
+            previous = self._confirm_timer
+            self._confirm_generation = generation
+            self._confirm_timer = timer
+        if previous is not None:
+            previous.cancel()
+        timer.start()
+        log.info("waiting for confirmation on this computer")
+        self._on_confirmation_required()
+
+    def _claim_confirmation(self, generation: int = 0) -> tuple[int, threading.Timer | None]:
+        """Take the pending prompt so only one of confirm/timeout/cancel acts."""
+        with self._state_lock:
+            pending = self._confirm_generation
+            if not pending or (generation and generation != pending):
+                return 0, None
+            timer = self._confirm_timer
+            self._confirm_generation = 0
+            self._confirm_timer = None
+            return pending, timer
+
+    def _end_confirmation(self) -> None:
+        """Withdraw a pending prompt because its session ended."""
+        generation, timer = self._claim_confirmation()
+        if timer is not None:
+            timer.cancel()
+        if generation:
+            self._on_confirmation_ended(False)
+
+    def _confirmation_timed_out(self, generation: int, peer: str) -> None:
+        claimed, _ = self._claim_confirmation(generation)
+        if not claimed:
+            return
+        log.warning("pairing was not confirmed in time")
+        self.send_status("pairing_confirm_timeout", generation)
+        self._on_confirmation_ended(False)
+        if self._pairing.reset_if_current(generation):
+            self._transport.disconnect(DISCONNECT_AFTER_ERROR_S, peer)
+
     def _run(self) -> None:
-        while (message := self._inbox.get()) is not None:
+        while (item := self._inbox.get()) is not None:
+            peer, message = item
             try:
-                self.handle_message(message)
+                self.handle_message(message, peer=peer)
             except Exception:
                 log.exception("setup command failed")
 
     # -- Dispatch ---------------------------------------------------------------
 
-    def handle_message(self, raw: bytes, decrypted: bool = False) -> None:
+    def handle_message(self, raw: bytes, decrypted: bool = False, peer: str = "") -> None:
+        if not decrypted and not self._bind(peer):
+            log.warning("ignoring command from second BLE device %s during pairing", peer)
+            return
         try:
             command = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
@@ -208,6 +300,7 @@ class SetupController:
         except PairingError as err:
             self.send_status(err.status)
             return
+        self._end_confirmation()
         with self._state_lock:
             self._plaintext_blocked = True
         self.send_json(ready)
@@ -216,19 +309,39 @@ class SetupController:
         try:
             plaintext = self._pairing.decrypt(envelope)
         except PairingError as err:
+            self._end_confirmation()
             self.send_status(err.status)
-            self._transport.disconnect(DISCONNECT_AFTER_ERROR_S)
+            self._transport.disconnect(DISCONNECT_AFTER_ERROR_S, self._peer)
             return
         self.handle_message(plaintext.encode("utf-8"), decrypted=True)
 
     def _handle_client_finished(self, command: dict) -> None:
         generation = self._pairing.handle_client_finished(command)
         if not generation:
+            self._end_confirmation()
             self.send_status("error_pairing_decrypt")
-            self._transport.disconnect(DISCONNECT_AFTER_ERROR_S)
+            self._transport.disconnect(DISCONNECT_AFTER_ERROR_S, self._peer)
             return
-        log.info("pairing confirmed (app consent)")
-        self.send_status("pairing_confirmed", generation)
+        # The prompt goes to the app before Enter can count, so a press made
+        # early can't make pairing_confirmed overtake confirm_required.
+        self.send_status("confirm_required", generation)
+        if self._pairing.awaiting_confirmation(generation):
+            self._await_confirmation(generation)
+
+    def confirm(self) -> bool:
+        """Confirm the prompted session; the person at this computer pressed Enter."""
+        generation, timer = self._claim_confirmation()
+        if not generation:
+            return False
+        if timer is not None:
+            timer.cancel()
+        confirmed = self._pairing.confirm(generation)
+        self._on_confirmation_ended(bool(confirmed))
+        if not confirmed:
+            return False
+        log.info("pairing confirmed on this computer")
+        self.send_status("pairing_confirmed", confirmed)
+        return True
 
     def _handle_wifi_scan(self) -> None:
         networks = [self._network.current_connection_entry()] if self._network.is_online() else []
@@ -294,7 +407,7 @@ class SetupController:
             except ProvisionFailed as err:
                 log.warning("provisioning failed: %s", err.status)
                 self.send_status(err.status, generation)
-                self._transport.disconnect(0.5)
+                self._transport.disconnect(0.5, self._peer)
                 return
             self.send_status("auth_ok", generation)
             log.info("setup complete")
@@ -317,7 +430,7 @@ class SetupController:
             if generation or blocked or status not in PLAINTEXT_STATUSES:
                 log.info("TX status suppressed: %s", status)
                 return
-            self._transport.send_packets([status.encode()])
+            self._transport.send_packets([status.encode()], self._peer)
             log.info("TX status: %s", status)
 
     def send_json(self, obj: dict) -> None:
@@ -335,6 +448,7 @@ class SetupController:
             log.info("TX %s (encrypted #%s)", obj.get("type"), envelope["counter"])
 
     def _send_locked(self, text: str) -> None:
-        packets = encode_chunks(text.encode("utf-8"), self._transport.mtu())
-        log.debug("TX %d bytes in %d packets (mtu %d)", len(text), len(packets), self._transport.mtu())
-        self._transport.send_packets(packets)
+        mtu = self._transport.mtu(self._peer)
+        packets = encode_chunks(text.encode("utf-8"), mtu)
+        log.debug("TX %d bytes in %d packets (mtu %d)", len(text), len(packets), mtu)
+        self._transport.send_packets(packets, self._peer)

@@ -35,6 +35,10 @@ bash omuseful-setup.sh --uninstall  # remove the service, token, and pairing
 - A local socket, `/run/musegadget/musegadget.sock`, for the `omuseful` group.
 - A non-secret status file, `/run/omuseful/status.json`.
 
+During pairing, the terminal asks you to verify the Muse app and press Enter
+before provisioning is allowed. The SDK token is never sent over Bluetooth;
+the companion reports it to Muse directly over HTTPS.
+
 The SDK token, device identity, and pairing stay root-only in
 `/var/lib/musegadget`. Logs never contain your messages, Muse's replies,
 links, or tokens (they do name the device and its Muse VM).

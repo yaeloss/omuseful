@@ -203,14 +203,14 @@ class BleServer:
     def __init__(
         self,
         local_name: str,
-        on_write: Callable[[bytes], None],
-        on_disconnect: Callable[[], None],
+        on_write: Callable[[bytes, str], None],
+        on_disconnect: Callable[[str], None],
     ) -> None:
         self._local_name = local_name
         self._on_write = on_write
         self._on_disconnect = on_disconnect
-        self._mtu = _ASSUMED_MTU
-        self._device_path: str | None = None
+        # Negotiated ATT MTU per connected device (BlueZ object path).
+        self._mtus: dict[str, int] = {}
         self._lock = threading.Lock()
         self._loop: GLib.MainLoop | None = None
         self._bus: dbus.SystemBus | None = None
@@ -220,18 +220,19 @@ class BleServer:
 
     # -- Transport --------------------------------------------------------------
 
-    def mtu(self) -> int:
+    def mtu(self, peer: str = "") -> int:
         with self._lock:
-            return self._mtu
+            return self._mtus.get(peer, _ASSUMED_MTU)
 
-    def send_packets(self, packets: list[bytes]) -> None:
+    def send_packets(self, packets: list[bytes], peer: str = "") -> None:
         for i, packet in enumerate(packets):
             if i:
                 time.sleep(CHUNK_STAGGER_S)
             GLib.idle_add(self._tx.notify, packet)
 
-    def disconnect(self, delay: float) -> None:
-        GLib.timeout_add(int(delay * 1000), self._disconnect_now)
+    def disconnect(self, delay: float, peer: str = "") -> None:
+        if peer:
+            GLib.timeout_add(int(delay * 1000), self._disconnect_now, peer)
 
     # -- Lifecycle --------------------------------------------------------------
 
@@ -292,37 +293,37 @@ class BleServer:
     # -- Internals (GLib thread) ------------------------------------------------
 
     def _handle_write(self, value: bytes, options: dict) -> None:
-        with self._lock:
-            if "mtu" in options and int(options["mtu"]) != self._mtu:
-                self._mtu = int(options["mtu"])
-                log.info("ATT MTU %d", self._mtu)
-            if "device" in options:
-                self._device_path = str(options["device"])
-        self._on_write(value)
+        # Setup is bound to one device at a time, so every write must say
+        # which device sent it; BlueZ always includes it for GATT writes.
+        if "device" not in options:
+            log.warning("ignoring a BLE write without a device")
+            return
+        peer = str(options["device"])
+        if "mtu" in options:
+            mtu = int(options["mtu"])
+            with self._lock:
+                changed = self._mtus.get(peer) != mtu
+                self._mtus[peer] = mtu
+            if changed:
+                log.info("ATT MTU %d for %s", mtu, peer)
+        self._on_write(value, peer)
 
     def _handle_device_change(self, interface, changed, invalidated, path=None):
         if "Connected" in changed:
             log.info("device %s %s", path, "connected" if changed["Connected"] else "disconnected")
         # dbus-python hands over dbus.Boolean values, which are never the
         # False singleton, so test the value rather than its identity.
-        if "Connected" in changed and not changed["Connected"]:
+        if "Connected" in changed and not changed["Connected"] and path:
             with self._lock:
-                ours = self._device_path in (None, path)
-                if ours:
-                    self._device_path = None
-                    self._mtu = _ASSUMED_MTU
-            if ours:
-                self._on_disconnect()
+                self._mtus.pop(str(path), None)
+            self._on_disconnect(str(path))
 
-    def _disconnect_now(self) -> bool:
-        with self._lock:
-            path = self._device_path
-        if path:
-            try:
-                device = dbus.Interface(self._bus.get_object(BLUEZ_SERVICE, path), DEVICE_IFACE)
-                device.Disconnect(timeout=5)
-            except dbus.exceptions.DBusException as err:
-                log.warning("disconnect failed: %s", err)
+    def _disconnect_now(self, peer: str) -> bool:
+        try:
+            device = dbus.Interface(self._bus.get_object(BLUEZ_SERVICE, peer), DEVICE_IFACE)
+            device.Disconnect(timeout=5)
+        except dbus.exceptions.DBusException as err:
+            log.warning("disconnect failed: %s", err)
         return False
 
     def _fatal(self, what: str, err: Exception) -> None:

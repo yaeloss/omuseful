@@ -85,10 +85,13 @@ Bluetooth pairing uses the Muse gadget SDK's community mode
 (`pairing_auth: "none"`): the setup records are encrypted with an
 unauthenticated ECDH exchange, so they are safe from passive observers but
 not from an active man-in-the-middle in Bluetooth range during the pairing
-window. Both the credentials the app provisions and your SDK token (which
-the app needs to mint them) cross that channel. Pair at home or somewhere
-you control, keep the window (10 minutes, only while `sudo musegadget pair`
-is running) short, and re-pair if you ever suspect it was interfered with.
+window. The phone must finish the encrypted handshake, and the person at the
+computer must press Enter in the pairing terminal before provisioning is
+allowed. The SDK token is never sent over Bluetooth; the companion reports it
+to Muse directly over HTTPS. A nearby attacker can still interfere with or
+race a pairing session, so pair at home or somewhere you control, keep the
+window (10 minutes, only while `sudo musegadget pair` is running) short, and
+re-pair if you ever suspect it was interfered with.
 Endpoints the pairing supplies are pinned before any token is sent to
 them: API URLs must be https on `api.muse.ai` or another `*.muse.ai` host
 (any Muse subdomain is trusted with the device token), the Noise host
