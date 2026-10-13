@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA = 1
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 CHAT_GROUP = "omuseful"
 MAX_JSON = 128 * 1024
 USERNAME = re.compile(r"[a-z_][a-z0-9_-]*\$?")
