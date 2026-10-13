@@ -1,7 +1,5 @@
 # Omuseful
 
-![Omuseful: chat with your Muse from the Omarchy bar](.github/social-preview.png)
-
 **Chat with your Muse agent from the Omarchy bar.**
 
 Omuseful is a small Omarchy shell plugin: a bar icon and a chat panel for the
@@ -14,6 +12,8 @@ Omuseful is possible because Meta published the [Muse gadget SDK](https://github
 **Thanks to the Muse team for opening it up to the community.**
 
 > Independent community project, not made or endorsed by Meta or Omarchy.
+
+![Omuseful: chat with your Muse from the Omarchy bar](.github/social-preview.png)
 
 ## How it works
 
