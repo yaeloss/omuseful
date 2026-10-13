@@ -1,5 +1,7 @@
 # Omuseful
 
+![Omuseful: chat with your Muse from the Omarchy bar](.github/social-preview.png)
+
 **Chat with your Muse agent from the Omarchy bar.**
 
 Omuseful is a small Omarchy shell plugin: a bar icon and a chat panel for the
@@ -7,7 +9,7 @@ Muse app. Muse does its work in its own app and cloud, as it always does.
 Omuseful only shows the connection status and relays your messages and Muse's
 replies. **Nothing runs on this computer on Muse's behalf.**
 
-Omuseful is possible because Meta published the Muse gadget SDK as open source (Apache-2.0). The companion in companion/ is the SDK’s Linux device, trimmed to chat only. 
+Omuseful is possible because Meta published the [Muse gadget SDK](https://github.com/facebookincubator/muse-gadget-sdk) as open source (Apache-2.0). The companion in [`companion/`](companion/) is the SDK’s Linux device, trimmed to chat only.
 
 **Thanks to the Muse team for opening it up to the community.**
 
