@@ -49,9 +49,24 @@ def test_token_helper_source_keeps_secret_out_of_arguments_and_environment():
 
 def test_setup_is_chat_only_and_needs_no_execution_account():
     source = (Path(__file__).parents[1] / "omuseful-setup.sh").read_text()
-    assert "install.sh --from . --chat-only" in source
+    assert "install.sh --from . --chat-only --setup-user" in source
     assert "--run-as" not in source and "useradd" not in source
     assert "--no-pair" not in source  # setup ends by pairing with the Muse app
+
+
+def test_setup_delegates_access_changes_to_installer_after_source_check():
+    source = (Path(__file__).parents[1] / "omuseful-setup.sh").read_text()
+    assert "groupadd" not in source and "usermod" not in source
+    assert "omuseful-hardening.conf" not in source
+
+
+def test_source_is_checked_before_the_sdk_token_prompt():
+    source = (Path(__file__).parents[1] / "install.sh").read_text()
+    main = source[source.index("main() {"):]
+    assert main.index("prepare_source\n") < main.index("prompt_sdk_token\n")
+    assert main.index("prepare_source\n") < main.index("install_packages\n")
+    assert main.index("prepare_source\n") < main.index("enable_bluez\n")
+    assert main.index("prepare_source\n") < main.index("configure_omuseful_access\n")
 
 
 def test_setup_help_explains_chat_only():
@@ -73,8 +88,8 @@ def test_installer_never_builds_inside_the_plugin_folder():
     """A root build in the plugin folder leaves root-owned files that block
     `omarchy plugin remove` and updates."""
     source = (Path(__file__).parents[1] / "install.sh").read_text()
-    assert 'build_src="$(as_root mktemp -d /tmp/omuseful-build.XXXXXX)"' in source
-    assert '--no-build-isolation "$build_src"' in source
+    assert 'BUILD_TMP="$(as_root mktemp -d /tmp/omuseful-build.XXXXXX)"' in source
+    assert '--no-build-isolation "$BUILD_TMP"' in source
     assert '--reinstall "$SOURCE"' not in source
 
 
@@ -85,6 +100,81 @@ def test_installer_trusts_only_packaged_tools_and_local_source():
     assert "as_root python3 -I -" in source and "as_root python3 - " not in source
     assert '[ -d "$SOURCE" ] || die' in source
     assert "trap cleanup_build EXIT" in source
+
+
+def test_installer_gates_a_changed_source_against_the_last_install():
+    """Setup installs this folder as a root service, so a source tree that
+    changed since the last install needs an explicit confirmation."""
+    source = (Path(__file__).parents[1] / "install.sh").read_text()
+    assert 'SOURCE_HASH_FILE="$STATE_DIR/source.sha256"' in source
+    assert "verify_source_hash" in source and "record_source_hash" in source
+    assert "changed since it was last installed" in source
+    assert "--setup-user USER" in source
+    assert 'if [ "$ASSUME_YES" = 1 ]; then' in source  # --yes stays unattended
+
+
+def _gate_harness(tmp_path):
+    """The real hash/verify functions from install.sh, with root stubbed out."""
+    source = (Path(__file__).parents[1] / "install.sh").read_text()
+    functions = source[source.index("source_tree_hash() {"):source.index("\ninstall_musegadget()")]
+    tree = tmp_path / "tree"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "mod.py").write_text("x = 1\n")
+    state = tmp_path / "state"
+    state.mkdir()
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        'as_root() { "$@"; }\n'
+        'warn() { printf "%s\\n" "$*" >&2; }\n'
+        'die() { printf "%s\\n" "$*" >&2; exit 1; }\n'
+        f'SOURCE_HASH_FILE="{state}/source.sha256"\nSTATE_DIR="{state}"\n'
+        + functions
+        + '\ncase "$1" in\n'
+        + f'  hash) source_tree_hash "{tree}" ;;\n'
+        + '  record) record_source_hash "$2" ;;\n'
+        + '  verify) ASSUME_YES="$2" verify_source_hash "$3" ;;\n'
+        + "esac\n")
+    return script, tree
+
+
+def _run_gate(script, *args, detached=False):
+    command = (["setsid"] if detached else []) + ["bash", str(script), *args]
+    return subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
+
+
+def test_installer_gate_behaviour(tmp_path):
+    script, tree = _gate_harness(tmp_path)
+    first = _run_gate(script, "hash")
+    assert first.returncode == 0 and len(first.stdout.strip()) == 64
+    assert _run_gate(script, "hash").stdout == first.stdout  # deterministic
+    # First install: nothing recorded, so nothing is gated yet.
+    assert _run_gate(script, "verify", "0", first.stdout.strip(), detached=True).returncode == 0
+    assert _run_gate(script, "record", first.stdout.strip()).returncode == 0
+    # Unchanged tree passes without confirmation; a changed one does not.
+    assert _run_gate(script, "verify", "0", first.stdout.strip(), detached=True).returncode == 0
+    (tree / "pkg" / "mod.py").write_text("x = 2\n")
+    changed = _run_gate(script, "hash").stdout.strip()
+    assert changed != first.stdout.strip()
+    refused = _run_gate(script, "verify", "0", changed, detached=True)
+    assert refused.returncode != 0 and "changed since it was last installed" in refused.stderr
+    # --yes is the documented unattended waiver.
+    waived = _run_gate(script, "verify", "1", changed, detached=True)
+    assert waived.returncode == 0 and "Continuing because --yes" in waived.stderr
+    # A symlinked file is refused: its target could be swapped after hashing.
+    (tree / "pkg" / "link.py").symlink_to(tree / "pkg" / "mod.py")
+    linked = _run_gate(script, "hash")
+    assert linked.returncode != 0 and "symlink in the source tree" in linked.stderr
+
+
+def test_generated_caches_do_not_trigger_the_source_gate(tmp_path):
+    script, tree = _gate_harness(tmp_path)
+    initial = _run_gate(script, "hash").stdout
+    for name in (".pytest_cache", ".ruff_cache", "__pycache__", ".venv"):
+        cache = tree / name
+        cache.mkdir()
+        (cache / "changed-by-a-tool").write_text("generated content\n")
+        (cache / "tool-link").symlink_to(cache / "changed-by-a-tool")
+    assert _run_gate(script, "hash").stdout == initial
 
 
 def test_installer_refuses_a_token_argument():

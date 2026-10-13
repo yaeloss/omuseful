@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.12', '3.14']
+        python: ['3.11', '3.12', '3.14']
     env:
       PYTHONPATH: companion/src
     steps:
@@ -24,7 +24,7 @@ jobs:
       - run: python -m pip install cryptography==50.0.2 pytest==9.1.1 ruff==0.17.0
       - run: python -m pytest                   # plugin, including the companion contract
       - run: python -m pytest companion/tests   # companion
-      - run: ruff check helpers tests
+      - run: ruff check helpers tests companion/src companion/tests
       - run: python -m json.tool manifest.json > /dev/null
       # Plugin validation and qmllint need an Omarchy/Quickshell host; they are
       # part of the manual release checklist in SECURITY.md.

@@ -50,7 +50,7 @@ def refuse_command(command, params, timeout_ms=None) -> dict:
     return {"ok": False, "error": "This Omuseful device is chat-only; it runs no commands."}
 
 
-DEFAULT_NOISE_HOST = "hatch.metaaivm.com"
+DEFAULT_NOISE_HOST = muse_api.NOISE_HOST
 BACKOFF_BASE_S = 2.0
 BACKOFF_MAX_S = 60.0
 AUTH_BACKOFF_MIN_S = 15.0
@@ -166,7 +166,7 @@ class Service:
             session_stop.set()
         run_command = refuse_command
         session = LinkSession(
-            noise_host=pairing.get("noise_host") or DEFAULT_NOISE_HOST,
+            noise_host=muse_api.trusted_noise_host(pairing.get("noise_host")),
             vm_id=vm["vm_id"] or vm["vm_name"],
             vm_auth_token=vm["vm_auth_token"],
             device=device,

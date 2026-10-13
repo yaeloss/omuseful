@@ -199,7 +199,7 @@ Item {
 
   Timer {
     id: chatTimeout
-    interval: 370000
+    interval: 420000
     onTriggered: {
       root.chatMessage = "Muse is taking longer than expected. Any partial text is kept; check the Muse app."
       root.chatFinished = true

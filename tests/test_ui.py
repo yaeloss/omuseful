@@ -59,7 +59,13 @@ def test_text_is_plain_and_links_are_fixed():
     assert 'readonly property bool rich: chatRow.fromMuse && chatRow.messageHtml !== ""' in panel
     assert CODE.count("RichText") == 1 and "StyledText" not in CODE
     assert "onLinkActivated: function(link) { root.openLink(link) }" in panel
-    assert "/^https?:\\/\\/[^\\s]+$/.test(url)" in panel
+    # The QML opener applies the helper's safe_url rules a second time:
+    # printable ASCII, a real host, no backslash, no user@ part.
+    assert 'url.indexOf("\\\\")' in panel and "charCodeAt" in panel
+    assert "[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?" in panel
+    # Same bounds as safe_url: length cap, port range, valid IPv6 literals.
+    assert "url.length > 2048" in panel and "parseInt(parts[2], 10) > 65535" in panel
+    assert 'inner.indexOf(":::")' in panel and "groups.length !== 8" in panel
     assert "TextField" not in guide and "password" not in guide.lower()
     assert guide.count("Qt.openUrlExternally(") == guide.count('startsWith("https://gadgets.muse.ai/")')
 
@@ -81,6 +87,8 @@ def test_bar_uses_the_original_mark():
 
 
 def test_a_pending_reply_can_be_stopped():
+    # The panel timeout must outlast the companion's 60s accept + 300s reply.
+    assert "interval: 420000" in QML["Service.qml"]
     assert "function stopChat()" in QML["Service.qml"] and "chatProcess.running = false" in QML["Service.qml"]
     assert "root.sending ? root.service.stopChat() : root.submitMessage()" in QML["Panel.qml"]
 

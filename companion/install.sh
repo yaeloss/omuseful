@@ -32,6 +32,11 @@ UNIT="/etc/systemd/system/musegadget.service"
 STATE_DIR="/var/lib/musegadget"
 BLUEZ_CONF="/etc/bluetooth/main.conf"
 BLUEZ_DROPIN="/etc/systemd/system/bluetooth.service.d/zz-musegadget.conf"
+OMUSEFUL_DROPIN="/etc/systemd/system/musegadget.service.d/omuseful.conf"
+# Hash of the source tree last installed as the root service. The plugin
+# folder is user-writable (every shell plugin shares it), so a tree that
+# changed since the last install is only installed after confirmation.
+SOURCE_HASH_FILE="$STATE_DIR/source.sha256"
 # Always this folder: nothing is fetched from another repository.
 DEFAULT_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Everything, including uv and the build backend, from the signed Arch repos.
@@ -50,7 +55,10 @@ Usage: install.sh [options]
                     so the Muse can't run anything on this computer.
                     The SDK token is asked for with hidden input and saved,
                     readable only by root, in $STATE_DIR/sdk_token.
-  --yes             Don't ask for confirmation.
+  --yes             Don't ask for confirmation, including before installing
+                    a companion source tree that changed since the last
+                    install (see SECURITY.md). Use only unattended.
+  --setup-user USER  Set up Omuseful access and service hardening for USER.
   --no-pair         Install without opening Bluetooth pairing.
   --uninstall       Remove musegadget. Keeps the device identity and pairing
                     in $STATE_DIR unless --purge is also given.
@@ -114,6 +122,78 @@ enable_bluez() {
     fi
 }
 
+source_tree_hash() {
+    # Deterministic hash of the private build copy. Generated caches are
+    # excluded; build output was already removed from the copy. Symlinks in
+    # checked source are refused: their targets could be swapped after hashing.
+    # Runs as root: the copy is root-owned and private.
+    as_root python3 -I - "$1" <<'EOF'
+import hashlib, os, sys
+digest = hashlib.sha256()
+excluded = {".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
+for dirpath, dirnames, filenames in os.walk(sys.argv[1]):
+    kept_dirs = []
+    for name in sorted(dirnames):
+        if name in excluded:
+            continue
+        if os.path.islink(os.path.join(dirpath, name)):
+            sys.exit(f"refusing to install: symlink in the source tree: "
+                     f"{os.path.join(dirpath, name)}")
+        kept_dirs.append(name)
+    for name in sorted(filenames):
+        if os.path.islink(os.path.join(dirpath, name)):
+            sys.exit(f"refusing to install: symlink in the source tree: "
+                     f"{os.path.join(dirpath, name)}")
+    dirnames[:] = kept_dirs
+    for name in sorted(filenames):
+        path = os.path.join(dirpath, name)
+        if not os.path.isfile(path):
+            continue
+        digest.update(os.path.relpath(path, sys.argv[1]).encode() + b"\0")
+        digest.update(str(os.path.getsize(path)).encode() + b"\0")
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+print(digest.hexdigest())
+EOF
+}
+
+verify_source_hash() {
+    local hash="$1" stored=""
+    if as_root test -f "$SOURCE_HASH_FILE"; then
+        stored="$(as_root cat "$SOURCE_HASH_FILE")"
+    fi
+    if [ -z "$stored" ] || [ "$stored" = "$hash" ]; then return 0; fi
+    warn "The companion source changed since it was last installed."
+    warn "  installed: ${stored:0:16}...  this folder: ${hash:0:16}..."
+    warn "Only continue if you expected an Omuseful update; anything that can"
+    warn "write to the plugin folder could otherwise become a root service."
+    if [ "$ASSUME_YES" = 1 ]; then
+        warn "Continuing because --yes was given."
+        return 0
+    fi
+    [ -r /dev/tty ] || die "companion source changed; re-run setup interactively to confirm."
+    local reply=""
+    printf 'Install the changed source as the root service anyway? [y/N] ' >/dev/tty
+    IFS= read -r reply </dev/tty || reply=""
+    [ "$reply" = y ] || [ "$reply" = Y ] || die "cancelled; the installed companion was not changed."
+}
+
+record_source_hash() {
+    as_root install -d -m 0700 "$STATE_DIR"
+    printf '%s\n' "$1" | as_root install -m 0600 /dev/stdin "$SOURCE_HASH_FILE"
+}
+
+prepare_source() {
+    # Check the exact private copy that will be built, before installing
+    # packages, enabling Bluetooth, or changing the service configuration.
+    BUILD_TMP="$(as_root mktemp -d /tmp/omuseful-build.XXXXXX)"
+    as_root cp -R "$SOURCE/." "$BUILD_TMP/"
+    as_root rm -rf "$BUILD_TMP/build" "$BUILD_TMP"/src/*.egg-info
+    SOURCE_HASH="$(source_tree_hash "$BUILD_TMP")"
+    verify_source_hash "$SOURCE_HASH"
+}
+
 install_musegadget() {
     local uv="${UV_BIN:-$PREFIX/bin/uv}"
     # The system interpreter is required: dbus and gi come from pacman and are
@@ -123,25 +203,26 @@ install_musegadget() {
         as_root "$uv" venv --quiet --python /usr/bin/python3 --system-site-packages "$VENV"
     fi
     say "Installing musegadget from $SOURCE"
-    local build_src="$SOURCE"
-    if [ -d "$SOURCE" ]; then
-        # Build from a private root-owned copy: root never writes build files
-        # into (or reads mid-edit from) the user's plugin folder.
-        build_src="$(as_root mktemp -d /tmp/omuseful-build.XXXXXX)"
-        BUILD_TMP="$build_src"
-        as_root cp -R "$SOURCE/." "$build_src/"
-        as_root rm -rf "$build_src/build" "$build_src"/src/*.egg-info
-    fi
     # The build backend is the system python-setuptools: nothing is fetched.
     as_root "$uv" pip install --quiet --python "$VENV/bin/python" --no-deps --reinstall \
-        --no-build-isolation "$build_src"
+        --no-build-isolation "$BUILD_TMP"
     cleanup_build
     local data
     data="$(as_root "$VENV/bin/python" -I -c 'import musegadget, os; print(os.path.join(os.path.dirname(musegadget.__file__), "data"))')"
     as_root "$uv" pip install --quiet --python "$VENV/bin/python" --require-hashes \
         -r "$data/requirements.lock"
     as_root ln -sf "$VENV/bin/musegadget" /usr/local/bin/musegadget
+    record_source_hash "$SOURCE_HASH"
     DATA_DIR="$data"
+}
+
+configure_omuseful_access() {
+    [ -n "$SETUP_USER" ] || return 0
+    getent group omuseful >/dev/null || as_root groupadd --system omuseful
+    as_root usermod -a -G omuseful "$SETUP_USER"
+    as_root install -d -o root -g root -m 0755 "$(dirname "$OMUSEFUL_DROPIN")"
+    as_root install -o root -g root -m 0644 \
+        "$DATA_DIR/omuseful-hardening.conf" "$OMUSEFUL_DROPIN"
 }
 
 configure_bluez() {
@@ -361,7 +442,7 @@ cleanup_build() {
 }
 
 main() {
-    SOURCE="$DEFAULT_SOURCE" SDK_TOKEN="" ASSUME_YES=0 NO_PAIR=0 UNINSTALL=0 PURGE=0 BUILD_TMP=""
+    SOURCE="$DEFAULT_SOURCE" SDK_TOKEN="" ASSUME_YES=0 NO_PAIR=0 UNINSTALL=0 PURGE=0 BUILD_TMP="" SETUP_USER=""
     trap cleanup_build EXIT
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -369,6 +450,7 @@ main() {
             --chat-only) shift ;;
             --sdk-token) die "never pass a token as an argument; the installer asks for it with hidden input." ;;
             --yes|-y) ASSUME_YES=1; shift ;;
+            --setup-user) SETUP_USER="${2:?--setup-user needs a value}"; shift 2 ;;
             --no-pair) NO_PAIR=1; shift ;;
             --uninstall) UNINSTALL=1; shift ;;
             --purge) PURGE=1; shift ;;
@@ -383,17 +465,23 @@ main() {
     if [ "$UNINSTALL" = 1 ]; then uninstall; return; fi
     [ -d "$SOURCE" ] || die "--from must be a local folder (Omuseful installs only from its own source)."
     SOURCE="$(cd "$SOURCE" && pwd)"
+    if [ -n "$SETUP_USER" ]; then
+        [[ "$SETUP_USER" =~ ^[a-z_][a-z0-9_-]*$ && "$SETUP_USER" != root ]] &&
+            id "$SETUP_USER" >/dev/null || die "--setup-user needs an existing desktop user."
+    fi
 
     check_system
+    choose_account
+    prepare_source
     prompt_sdk_token
     if [ -n "$SDK_TOKEN" ] && ! [[ "$SDK_TOKEN" =~ ^mgst_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$ ]]; then
         die "that SDK token is not valid; copy it again from gadgets.muse.ai."
     fi
-    choose_account
     install_packages
     enable_bluez
     install_uv
     install_musegadget
+    configure_omuseful_access
     configure_bluez
     save_sdk_token
     install_service

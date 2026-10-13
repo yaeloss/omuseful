@@ -19,9 +19,11 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from musegadget import __version__
 
@@ -30,14 +32,98 @@ log = logging.getLogger(__name__)
 API_BASE = "https://api.muse.ai"
 FETCH_PATH = "/fetch_vms"
 REFRESH_PATH = "/device_token/refresh"
+# The pairing supplies these endpoints, but the device sends its bearer
+# tokens to them, so only Meta's hosts are ever trusted with credentials.
+API_HOST = "api.muse.ai"
+API_HOST_SUFFIX = ".muse.ai"
+NOISE_HOST = "hatch.metaaivm.com"
+NOISE_HOST_SUFFIX = ".metaaivm.com"
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _valid_host(host: str) -> bool:
+    return len(host) <= 253 and all(
+        _HOST_LABEL.fullmatch(label) for label in host.split(".")
+    )
+
+
+def _trusted_host(host: str | None, exact: str, suffix: str) -> bool:
+    return bool(host) and _valid_host(host) and (host == exact or host.endswith(suffix))
+
+
+def trusted_api_url(url: object) -> bool:
+    """True for an https Muse API URL with no userinfo or unusual port."""
+    if not isinstance(url, str) or "\\" in url:
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and _trusted_host(parts.hostname, API_HOST, API_HOST_SUFFIX)
+        and parts.username is None
+        and parts.password is None
+        and port in (None, 443)
+        and not parts.query
+        and not parts.fragment
+    )
 
 
 def api_root(api_url_v2: str = "") -> str:
     """The URL that API paths are appended to: ``api_url_v2``, or the Muse API.
 
-    ``api_url`` is ignored. Only older firmware reads it, adding ``/hatch``.
+    An untrusted ``api_url_v2`` from the pairing is ignored rather than
+    trusted with the device token. ``api_url`` is ignored entirely; only
+    older firmware reads it, adding ``/hatch``.
     """
-    return (api_url_v2 or API_BASE).rstrip("/")
+    candidate = (api_url_v2 or "").strip().rstrip("/")
+    if candidate and trusted_api_url(candidate):
+        return candidate
+    if candidate:
+        log.warning("ignoring untrusted Muse API URL from the pairing")
+    return API_BASE
+
+
+def trusted_noise_host(value: object) -> str:
+    """The Noise host from the pairing, or Meta's default when untrusted."""
+    host = value.strip().lower() if isinstance(value, str) else ""
+    if _trusted_host(host, NOISE_HOST, NOISE_HOST_SUFFIX):
+        return host
+    if host:
+        log.warning("ignoring untrusted Noise host from the pairing")
+    return NOISE_HOST
+
+
+class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects that would carry the Authorization header elsewhere.
+
+    Only an https redirect to the same host on the standard port is
+    followed: a downgrade to http or a move to another port on the same
+    host would still receive the bearer token.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            target = urlsplit(newurl)
+            port = target.port
+        except ValueError:
+            return None
+        if (
+            target.scheme != "https"
+            or port not in (None, 443)
+            or target.hostname != urlsplit(req.full_url).hostname
+            or target.username is not None
+            or target.password is not None
+        ):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(request, timeout: float):
+    opener = urllib.request.build_opener(_SameHostRedirectHandler)
+    return opener.open(request, timeout=timeout)
 
 
 def user_agent() -> str:
@@ -70,7 +156,7 @@ def fetch_vms_with_status(
     req.add_header("X-API-Version", "1.0.0")
     req.add_header("User-Agent", user_agent())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _open(req, timeout=15) as resp:
             status = resp.getcode()
             data = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
@@ -124,7 +210,7 @@ def _post_refresh(
     req.add_header("Authorization", auth_header)
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", user_agent())
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with _open(req, timeout=15) as resp:
         data = json.loads(resp.read())
     if isinstance(data, dict) and isinstance(data.get("payload"), dict):
         data = data["payload"]

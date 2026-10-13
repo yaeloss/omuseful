@@ -40,8 +40,10 @@ class _SystemNetwork:
 
 
 def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bool]], bool]) -> None:
-    api_url = credentials.api_url if credentials.api_url.startswith("https://") else ""
-    api_url_v2 = credentials.api_url_v2 if credentials.api_url_v2.startswith("https://") else ""
+    # Only Meta's hosts are stored: the service sends its bearer tokens to
+    # these endpoints, so an untrusted one from provisioning is dropped.
+    api_url = credentials.api_url if muse_api.trusted_api_url(credentials.api_url) else ""
+    api_url_v2 = credentials.api_url_v2 if muse_api.trusted_api_url(credentials.api_url_v2) else ""
     vms, status = muse_api.fetch_vms_with_status(
         credentials.access_token, muse_api.api_root(api_url_v2),
     )
@@ -56,7 +58,7 @@ def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bo
         "username": credentials.username,
         "api_url": api_url,
         "api_url_v2": api_url_v2,
-        "noise_host": credentials.noise_host,
+        "noise_host": muse_api.trusted_noise_host(credentials.noise_host),
         "access_token_saved_at": int(time.time()),
     }
 

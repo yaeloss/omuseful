@@ -66,6 +66,36 @@ per-user ACL so members don't have to log out). Any process running as a
 member can send chat as you, including other shell plugins, since all
 plugins share one unsandboxed process.
 
+Setup installs this plugin's `companion/` folder as that root service, and
+the folder is writable by anything running as you. The installer therefore
+records a hash of the installed source and asks for explicit confirmation
+before installing a changed tree; only confirm when you expected an update.
+The first install (or the first after `--purge`) has no recorded hash to
+compare against, so it is trusted as-is: install only a checkout you
+obtained and inspected yourself. `--yes` waives the changed-tree
+confirmation (with a warning) for unattended installs, so don't use it for
+interactive setup. Generated caches do not affect this hash. Symlinks in
+the checked source are refused, since a link
+target outside the installer's private build copy could be swapped after
+hashing.
+
+## Pairing
+
+Bluetooth pairing uses the Muse gadget SDK's community mode
+(`pairing_auth: "none"`): the setup records are encrypted with an
+unauthenticated ECDH exchange, so they are safe from passive observers but
+not from an active man-in-the-middle in Bluetooth range during the pairing
+window. Both the credentials the app provisions and your SDK token (which
+the app needs to mint them) cross that channel. Pair at home or somewhere
+you control, keep the window (10 minutes, only while `sudo musegadget pair`
+is running) short, and re-pair if you ever suspect it was interfered with.
+Endpoints the pairing supplies are pinned before any token is sent to
+them: API URLs must be https on `api.muse.ai` or another `*.muse.ai` host
+(any Muse subdomain is trusted with the device token), the Noise host
+must be `hatch.metaaivm.com` or another `*.metaaivm.com` host, and API
+redirects are followed only to the same host over https on the standard
+port, so a redirect can't downgrade the connection or move it elsewhere.
+
 ## Reporting
 
 Report vulnerabilities privately through GitHub security advisories on this
@@ -73,7 +103,8 @@ repository. Never post tokens, pairing files, or real chats in issues.
 
 ## Release checklist
 
-CI runs the plugin tests, the companion tests, and `ruff check helpers tests`.
+CI runs the plugin tests, the companion tests, and
+`ruff check helpers tests companion/src companion/tests`.
 
 The marketplace's automated baseline should report no findings, and
 `review-required` for capabilities that are accurately present: the companion's

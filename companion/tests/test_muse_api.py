@@ -32,7 +32,7 @@ def sent(monkeypatch):
         bodies.append((req.get_header("Authorization"), json.loads(req.data)))
         return io.BytesIO(json.dumps(TOKENS).encode())
 
-    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(muse_api, "_open", urlopen)
     return bodies
 
 
@@ -58,5 +58,51 @@ def test_a_rejected_refresh_reports_401(monkeypatch):
     def urlopen(req, timeout):
         raise muse_api.urllib.error.HTTPError(req.full_url, 401, "", {}, io.BytesIO(b""))
 
-    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(muse_api, "_open", urlopen)
     assert muse_api.refresh_device_token("r", "homelink-abcdef") == (None, 401)
+
+
+def test_api_root_only_trusts_muse_hosts():
+    assert muse_api.api_root() == "https://api.muse.ai"
+    assert muse_api.api_root("https://api.muse.ai") == "https://api.muse.ai"
+    assert muse_api.api_root("https://edge.muse.ai/v2") == "https://edge.muse.ai/v2"
+    for untrusted in ("https://evil.example", "https://api.muse.ai@evil.example",
+                      "https://api.muse.ai:8443", "http://api.muse.ai",
+                      "https://muse.ai.evil.example", "https://api.muse.ai?x=1",
+                      "https://api.muse.ai/#fragment", "not a url"):
+        assert muse_api.api_root(untrusted) == "https://api.muse.ai", untrusted
+
+
+def test_noise_host_only_trusts_metaaivm_hosts():
+    assert muse_api.trusted_noise_host("") == "hatch.metaaivm.com"
+    assert muse_api.trusted_noise_host("hatch.metaaivm.com") == "hatch.metaaivm.com"
+    for untrusted in ("evil.example", "hatch.metaaivm.com@evil.example",
+                      "hatch.metaaivm.com/evil", "https://hatch.metaaivm.com", None,
+                      ".metaaivm.com", "-.metaaivm.com", "a..metaaivm.com",
+                      "hatch.metaaivm.com."):
+        assert muse_api.trusted_noise_host(untrusted) == "hatch.metaaivm.com", untrusted
+
+
+def test_api_root_rejects_malformed_muse_hosts():
+    for untrusted in ("https://a..muse.ai", "https://-bad.muse.ai",
+                      "https://bad-.muse.ai", "https://api.muse.ai."):
+        assert muse_api.api_root(untrusted) == "https://api.muse.ai", untrusted
+
+
+def test_redirects_never_carry_credentials_to_another_host():
+    handler = muse_api._SameHostRedirectHandler()
+    req = muse_api.urllib.request.Request("https://api.muse.ai/fetch_vms")
+    assert handler.redirect_request(req, None, 302, "", {}, "https://evil.example/x") is None
+    same = handler.redirect_request(req, None, 302, "", {}, "https://api.muse.ai/other")
+    assert same is not None and same.full_url == "https://api.muse.ai/other"
+    explicit = handler.redirect_request(req, None, 302, "", {}, "https://api.muse.ai:443/other")
+    assert explicit is not None and explicit.full_url == "https://api.muse.ai:443/other"
+
+
+def test_redirects_never_downgrade_scheme_or_move_port():
+    handler = muse_api._SameHostRedirectHandler()
+    req = muse_api.urllib.request.Request("https://api.muse.ai/fetch_vms")
+    req.add_header("Authorization", "Bearer SECRET")
+    for newurl in ("http://api.muse.ai/x", "https://api.muse.ai:8443/x",
+                   "https://api.muse.ai:notaport/x", "https://user@api.muse.ai/x"):
+        assert handler.redirect_request(req, None, 302, "", {}, newurl) is None, newurl

@@ -35,7 +35,7 @@ Omuseful panel ──▶ local helper ──▶ chat-only companion ──▶ Mu
 
 - Omarchy with Quickshell shell plugins (tested on Omarchy 4.0.4, Quickshell
   0.3.1, Qt 6.11, Arch x86_64).
-- `/usr/bin/python3` (3.9+) and `wl-copy` (Omarchy ships both).
+- `/usr/bin/python3` (3.11+) and `wl-copy` (Omarchy ships both).
 - A Muse account, the Muse app on your phone, and your own SDK token
   ([terms](https://gadgets.muse.ai/sdk-terms)).
 - For the companion's one-time setup: `sudo` and a Bluetooth adapter (used
@@ -58,7 +58,9 @@ system settings.
 3. Click **Run setup**. A terminal opens: press Enter, type your password,
    and paste the token when asked (it stays hidden).
 4. Follow the on-screen steps to add this computer in the Muse app on your
-   phone. When it says **Paired**, you're done.
+   phone. When it says **Paired**, you're done. Pair somewhere private:
+   Bluetooth pairing cannot prove it is really your phone against an active
+   attacker nearby (see [SECURITY.md](SECURITY.md#pairing)).
 
 Setup installs a small system service. Pairing is the only step that uses
 Bluetooth; chat then goes over the internet. To run it by hand instead:
@@ -104,8 +106,9 @@ omarchy plugin remove omuseful
 ```
 
 The uninstaller removes the service, the SDK token, and the pairing, and
-restores the system settings setup changed. Also remove the device in the
-Muse app (Settings > Devices).
+restores the system settings setup changed. The Arch packages setup
+installed (such as `bluez` and `uv`) are left in place. Also remove the
+device in the Muse app (Settings > Devices).
 
 ## Privacy
 
@@ -126,7 +129,7 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 python3 -m venv .venv && .venv/bin/pip install pytest ruff -e companion
 .venv/bin/python -m pytest                      # plugin + companion contract
 .venv/bin/python -m pytest companion/tests      # companion
-.venv/bin/ruff check helpers tests
+.venv/bin/ruff check helpers tests companion/src companion/tests
 omarchy plugin validate .
 qmllint -I "$OMARCHY_PATH/shell" *.qml
 ```

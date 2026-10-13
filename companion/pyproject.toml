@@ -22,9 +22,9 @@ version = "0.1.0"
 description = "Make any Linux computer into a Muse Home Link that pairs with the Muse app"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9"
-# cryptography comes from the distro (python3-cryptography) on devices; the
-# floor is Debian 11 / Raspberry Pi OS Bullseye's 3.3.2.
+requires-python = ">=3.11"
+# cryptography comes from the distro (python3-cryptography) on devices.
+# The 3.11 floor is the oldest version CI tests.
 dependencies = ["cryptography>=3.3.2", "websockets>=13"]
 
 [project.scripts]

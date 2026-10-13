@@ -201,8 +201,10 @@ def test_a_rejected_sdk_token_report_keeps_the_pairing(tmp_path, monkeypatch):
     assert (tmp_path / "pairing.json").exists()
 
 
-def test_api_root_uses_api_url_v2_or_the_muse_api():
-    assert muse_api.api_root("https://api.example/") == "https://api.example"
+def test_api_root_uses_a_trusted_api_url_v2_or_the_muse_api():
+    assert muse_api.api_root("https://edge.muse.ai/") == "https://edge.muse.ai"
+    # A pairing may not redirect the device token to an arbitrary host.
+    assert muse_api.api_root("https://api.example/") == "https://api.muse.ai"
     assert muse_api.api_root() == "https://api.muse.ai"
 
 

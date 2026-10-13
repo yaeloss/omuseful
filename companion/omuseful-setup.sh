@@ -85,12 +85,7 @@ read -r -p "Continue? [Y/n] " CONFIRM
 [[ -z "$CONFIRM" || "$CONFIRM" == [yY] ]] || die "cancelled"
 sudo -v
 
-getent group "$GROUP" >/dev/null || sudo groupadd --system "$GROUP"
-sudo usermod -a -G "$GROUP" "$DESKTOP_USER"
-sudo install -d -o root -g root -m 0755 "$(dirname "$DROPIN")"
-sudo install -o root -g root -m 0644 "$HERE/src/musegadget/data/omuseful-hardening.conf" "$DROPIN"
-
 # Meta's installer asks for the SDK token, installs the service, then pairs.
-(cd "$HERE" && bash install.sh --from . --chat-only)
+(cd "$HERE" && bash install.sh --from . --chat-only --setup-user "$DESKTOP_USER")
 
 printf '\nOmuseful is ready. Click its icon in the Omarchy bar to chat with your Muse.\n'
