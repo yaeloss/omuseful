@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "omuseful",
+  "name": "Omuseful",
+  "version": "0.1.0",
+  "author": "yaeloss",
+  "license": "MIT",
+  "description": "Chat with your Muse from the Omarchy bar. Includes a chat-only companion set up with one command; Muse can't run anything on this computer.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omuseful",
+    "description": "Muse connection status and a chat panel.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "aliases": [
+      "muse",
+      "ai",
+      "assistant",
+      "chat"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.14']
+    env:
+      PYTHONPATH: companion/src
+    steps:
+      # Actions pinned to commit SHAs, packages to exact versions or hashes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --require-hashes -r companion/src/musegadget/data/requirements.lock
+      - run: python -m pip install cryptography==50.0.2 pytest==9.1.1 ruff==0.17.0
+      - run: python -m pytest                   # plugin, including the companion contract
+      - run: python -m pytest companion/tests   # companion
+      - run: ruff check helpers tests
+      - run: python -m json.tool manifest.json > /dev/null
+      # Plugin validation and qmllint need an Omarchy/Quickshell host; they are
+      # part of the manual release checklist in SECURITY.md.
