@@ -69,6 +69,14 @@ Install only this chat-only build. A stock Muse gadget registers `system.run`
 and file commands and writes no Omuseful status, so the plugin never treats
 it as ready. Don't pair a stock gadget on a machine you care about.
 
+Incoming WebSocket messages are limited to 64 KiB by the WebSocket parser,
+before the Noise handshake or decryption. This includes the combined size of
+all fragments: oversized messages close the connection with code 1009, even
+before the final fragment arrives. WebSocket compression is disabled, so
+compressed frames are rejected without inflation. A 4-frame receive-queue
+high-water mark applies backpressure. Larger application responses still use
+multiple bounded Noise chunks and remain subject to their downstream limits.
+
 Access to the chat socket is limited to the `omuseful` group (plus a
 per-user ACL so members don't have to log out). Any process running as a
 member can send chat as you, including other shell plugins, since all

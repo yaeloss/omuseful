@@ -64,6 +64,10 @@ HANDSHAKE_TIMEOUT_S = 20
 PING_INTERVAL_S = 20
 MAX_CONCURRENT_INVOKES = 4
 MAX_INBOUND_MESSAGE = 4 * 1024 * 1024
+# Noise chunks fit in 64 KiB including their protobuf envelope and AEAD tag.
+# Bound assembly in the WebSocket parser, not after recv() has allocated it.
+MAX_WEBSOCKET_MESSAGE_BYTES = 64 * 1024
+MAX_WEBSOCKET_QUEUE_FRAMES = 4
 # Matches JavaScript's encodeURIComponent, as the firmware does.
 _URI_COMPONENT_SAFE = "-_.!~*'()"
 
@@ -213,7 +217,10 @@ class LinkSession:
                 open_timeout=HANDSHAKE_TIMEOUT_S,
                 ping_interval=PING_INTERVAL_S,
                 ping_timeout=PING_INTERVAL_S,
-                max_size=None,
+                max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
+                max_queue=MAX_WEBSOCKET_QUEUE_FRAMES,
+                # Noise ciphertext doesn't benefit from WebSocket compression.
+                compression=None,
             )
         except InvalidStatus as exc:
             status = exc.response.status_code

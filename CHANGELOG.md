@@ -2,6 +2,9 @@
 
 ## 0.1.4 (unreleased)
 
+- Limit incoming companion WebSocket messages to 64 KiB before Noise processing,
+  disable compression, and apply receive-queue backpressure. Add real WebSocket
+  regression tests for oversized, fragmented, and compressed input.
 - Fix first-time pairing: restore the SDK token in the encrypted
   `pairing_confirmed` record, only after local terminal confirmation. Remove the
   ineffective startup refresh that attempted to register it over HTTPS.
