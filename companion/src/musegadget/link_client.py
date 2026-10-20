@@ -263,7 +263,8 @@ class LinkSession:
         """
         if wait_for_reply:
             if self._chat_lock.locked():
-                return {"ok": False, "error": "another desktop message is awaiting a reply"}
+                return {"ok": False, "delivery": "failed",
+                        "error": "another desktop message is awaiting a reply"}
             async with self._chat_lock:
                 return await self._send_chat(message, session_id, on_progress)
         return await self._send_chat(message, session_id, None, wait_for_reply=False)

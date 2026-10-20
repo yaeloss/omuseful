@@ -218,11 +218,13 @@ class PairingSession:
         device_id: str,
         mac: str,
         firmware_version: str,
+        sdk_token: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         generate_key: Callable[[], ec.EllipticCurvePrivateKey] = _generate_device_key,
         random_bytes: Callable[[int], bytes] = os.urandom,
     ) -> None:
         self._node_id = node_id
+        self._sdk_token = sdk_token
         self._device_id = device_id
         self._mac = mac
         self._firmware_version = firmware_version or "unknown"
@@ -472,32 +474,40 @@ class PairingSession:
         ``generation`` no longer matches (the work it belongs to is stale).
         """
         with self._lock:
-            if (
-                (generation and generation != self._generation)
-                or self._expire_locked()
-                or self._state is PairingState.IDLE
-            ):
-                return None
-            counter = self._tx_counter
-            sealed = self._tx.encrypt(
-                record_nonce(_FROM_DEVICE, counter),
-                plaintext.encode("utf-8"),
-                record_aad(self._session_id_b64, _FROM_DEVICE, counter),
-            )
-            self._tx_counter += 1
-            return {
-                "type": "pairing_encrypted",
-                "session_id": self._session_id_b64,
-                "counter": str(counter),
-                "ciphertext": b64url_encode(sealed[:-_TAG_BYTES]),
-                "tag": b64url_encode(sealed[-_TAG_BYTES:]),
-            }
+            return self._encrypt_json_locked(plaintext, generation)
+
+    def _encrypt_json_locked(self, plaintext: str, generation: int) -> dict | None:
+        if (
+            (generation and generation != self._generation)
+            or self._expire_locked()
+            or self._state is PairingState.IDLE
+        ):
+            return None
+        counter = self._tx_counter
+        sealed = self._tx.encrypt(
+            record_nonce(_FROM_DEVICE, counter),
+            plaintext.encode("utf-8"),
+            record_aad(self._session_id_b64, _FROM_DEVICE, counter),
+        )
+        self._tx_counter += 1
+        return {
+            "type": "pairing_encrypted",
+            "session_id": self._session_id_b64,
+            "counter": str(counter),
+            "ciphertext": b64url_encode(sealed[:-_TAG_BYTES]),
+            "tag": b64url_encode(sealed[-_TAG_BYTES:]),
+        }
 
     def encrypt_status(self, status: str, generation: int = 0) -> dict | None:
-        plaintext = json.dumps(
-            {"type": "status", "status": status}, separators=(",", ":"),
-        )
-        return self.encrypt_json(plaintext, generation)
+        with self._lock:
+            message = {"type": "status", "status": status}
+            # Muse records the SDK token only when the phone mints the device
+            # token. Send it only in the encrypted confirmation, after local
+            # consent, never in discovery or the confirmation prompt.
+            if (self._sdk_token and status == "pairing_confirmed"
+                    and self._state in (PairingState.READY, PairingState.PROVISIONING)):
+                message["sdk_token"] = self._sdk_token
+            return self._encrypt_json_locked(json.dumps(message, separators=(",", ":")), generation)
 
     def _provisioning_locked(self, generation: int) -> bool:
         return (

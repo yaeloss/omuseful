@@ -123,7 +123,7 @@ def test_local_stream_sends_progress_before_its_final_reply():
 def test_local_message_fails_cleanly_when_not_connected():
     async def check(service, path):
         reply = await ask(path, b'{"message": "hi"}\n')
-        assert reply == {"ok": False, "error": "not connected to the Muse"}
+        assert reply == {"ok": False, "delivery": "failed", "error": "not connected to the Muse"}
 
     run_with_socket(check)
 
@@ -170,18 +170,15 @@ def fresh_pairing() -> dict:
     return {"access_token": "a", "refresh_token": "r", "access_token_saved_at": int(time.time())}
 
 
-def test_a_start_with_an_sdk_token_refreshes_once_to_report_it(tmp_path, monkeypatch):
+def test_a_start_with_an_sdk_token_does_not_refresh_to_report_it(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSEGADGET_STATE_DIR", str(tmp_path))
     calls = []
 
-    def refresh(refresh_token, node_id, base_url, sdk_token):
-        calls.append(sdk_token)
-        return {"access_token": "new-a", "refresh_token": "new-r"}, 200
-
-    monkeypatch.setattr("musegadget.service.muse_api.refresh_device_token", refresh)
-    pairing = refresh_with({"sdk_token": "mgst_token"}, fresh_pairing(), calls=2)
-    assert calls == ["mgst_token"]
-    assert pairing["access_token"] == "new-a"
+    monkeypatch.setattr("musegadget.service.muse_api.refresh_device_token",
+                        lambda *args: calls.append(args))
+    fresh = fresh_pairing()
+    assert refresh_with({"sdk_token": "mgst_token"}, fresh, calls=2) is fresh
+    assert calls == []
 
 
 def test_a_start_without_an_sdk_token_keeps_a_fresh_token(monkeypatch):
@@ -191,14 +188,40 @@ def test_a_start_without_an_sdk_token_keeps_a_fresh_token(monkeypatch):
     assert refresh_with({}, fresh) is fresh
 
 
-def test_a_rejected_sdk_token_report_keeps_the_pairing(tmp_path, monkeypatch):
+def test_refreshing_a_due_token_does_not_send_the_sdk_token(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSEGADGET_STATE_DIR", str(tmp_path))
+    calls = []
+
+    def refresh(*args):
+        calls.append(args)
+        return {"access_token": "new-a", "refresh_token": "new-r"}, 200
+
+    monkeypatch.setattr("musegadget.service.muse_api.refresh_device_token", refresh)
+    old = {**fresh_pairing(), "access_token_saved_at": 0}
+    result = refresh_with({"sdk_token": "PRIVATE-SYNTHETIC"}, old)
+    assert result["access_token"] == "new-a"
+    assert len(calls) == 1 and len(calls[0]) == 3
+    assert "PRIVATE-SYNTHETIC" not in str(calls)
+
+
+def test_changing_a_paired_sdk_token_warns_once_without_logging_tokens(monkeypatch, caplog):
     monkeypatch.setattr("musegadget.service.muse_api.refresh_device_token",
-                        lambda *args: (None, 401))
-    fresh = fresh_pairing()
-    (tmp_path / "pairing.json").write_text(json.dumps(fresh))
-    assert refresh_with({"sdk_token": "mgst_token"}, fresh) is fresh
-    assert (tmp_path / "pairing.json").exists()
+                        lambda *args: pytest.fail("unexpected refresh"))
+    token = "mgst_" + "B" * 43
+    paired = {**fresh_pairing(), "sdk_token_hint": "mgst_AAAAAAA"}
+    refresh_with({"sdk_token": token}, paired, calls=2)
+    assert caplog.text.count("SDK token changed since pairing") == 1
+    assert "pair --force" in caplog.text and token not in caplog.text
+
+
+@pytest.mark.parametrize("hint", [None, "mgst_AAAAAAA"])
+def test_an_older_or_matching_pairing_does_not_warn_about_a_changed_token(hint, caplog):
+    token = "mgst_AAAAAAA" + "A" * 32
+    paired = fresh_pairing()
+    if hint:
+        paired["sdk_token_hint"] = hint
+    assert refresh_with({"sdk_token": token}, paired) is paired
+    assert "SDK token changed" not in caplog.text
 
 
 def test_api_root_uses_a_trusted_api_url_v2_or_the_muse_api():
@@ -217,7 +240,7 @@ def test_local_socket_cannot_store_an_sdk_token(tmp_path, monkeypatch):
     reply = asyncio.run(service._local_request(
         json.dumps({"set_sdk_token": token}).encode(),
     ))
-    assert reply == {"ok": False, "error": "expected {\"message\": \"...\"}"}
+    assert reply == {"ok": False, "delivery": "failed", "error": "expected {\"message\": \"...\"}"}
     assert not (tmp_path / config.SDK_TOKEN_FILE).exists()
 
 

@@ -90,9 +90,7 @@ class Service:
     display_name: str = field(default_factory=socket.gethostname)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _last_refresh_attempt: float = float("-inf")
-    # The SDK token reaches Muse only in refresh bodies until apps forward it at
-    # mint, so each start with a token attempts one refresh to report it.
-    _sdk_token_report_attempted: bool = False
+    _sdk_token_warning_logged: bool = False
     _current: LinkSession | None = None
     _session_stop: asyncio.Event | None = None
     _command_cancelled: threading.Event | None = None
@@ -197,12 +195,14 @@ class Service:
         if self.chat is None:
             return
         try:
+            saved = config.load_json(config.PAIRING_FILE)
             self.chat.write_status(
-                paired=config.load_json(config.PAIRING_FILE) is not None,
+                paired=saved is not None,
                 connected=connected,
                 pairing=pairing,
                 ble_name=self.identity.ble_name,
                 sdk_token_configured=bool(self.sdk_token),
+                sdk_token_needs_pairing=self._sdk_token_changed(saved),
             )
         except OSError:
             log.warning("could not update Omuseful status", exc_info=True)
@@ -243,6 +243,10 @@ class Service:
             pass
         self._write_status(connected=connected, pairing=pairing)
 
+    def _sdk_token_changed(self, pairing: dict | None) -> bool:
+        hint = pairing.get("sdk_token_hint") if pairing else None
+        return bool(self.sdk_token and hint and hint != self.sdk_token[:12])
+
     async def _maybe_refresh(self, pairing: dict, force: bool = False) -> dict | None:
         """Return current pairing, rotating tokens first if they are due.
 
@@ -250,22 +254,21 @@ class Service:
         not be used yet; the pairing file is removed when the pairing itself
         has been revoked.
         """
+        if self._sdk_token_changed(pairing) and not self._sdk_token_warning_logged:
+            self._sdk_token_warning_logged = True
+            log.warning("SDK token changed since pairing; run `sudo musegadget pair --force` "
+                        "to use the new token")
         age = time.time() - pairing.get("access_token_saved_at", 0)
-        report_due = bool(self.sdk_token) and not self._sdk_token_report_attempted
         due = force or age >= TOKEN_REFRESH_AGE_S
-        if not due and not report_due:
+        if not due:
             return pairing
         if not force and time.monotonic() - self._last_refresh_attempt < TOKEN_RETRY_S:
             return pairing
         self._last_refresh_attempt = time.monotonic()
-        if report_due:
-            self._sdk_token_report_attempted = True
-            log.info("refreshing device token to report the SDK token")
         tokens, status = await asyncio.to_thread(
             muse_api.refresh_device_token,
             pairing["refresh_token"], self.identity.node_id,
             muse_api.api_root(pairing.get("api_url_v2", "")),
-            self.sdk_token,
         )
         if tokens:
             pairing = {
@@ -276,11 +279,6 @@ class Service:
             }
             config.save_json(config.PAIRING_FILE, pairing)
             log.info("device token rotated")
-            return pairing
-        if not due:
-            # Only reporting the SDK token: nothing has rejected the current
-            # token, so a refusal here must never unpair the device.
-            log.warning("SDK token report refresh failed (HTTP %s); keeping the pairing", status)
             return pairing
         if status == 401:
             config.delete_json(config.PAIRING_FILE)
@@ -367,15 +365,15 @@ class Service:
         request = json.loads(line)
         message = request.get("message") if isinstance(request, dict) else None
         if not isinstance(message, str) or not message.strip():
-            return {"ok": False, "error": "expected {\"message\": \"...\"}"}
+            return {"ok": False, "delivery": "failed", "error": "expected {\"message\": \"...\"}"}
         session_id = request.get("session_id")
         if session_id is not None and not (
             isinstance(session_id, str) and _SESSION_ID_RE.fullmatch(session_id)
         ):
-            return {"ok": False, "error": "session_id must be letters, digits and dashes"}
+            return {"ok": False, "delivery": "failed", "error": "session_id must be letters, digits and dashes"}
         session = self._current
         if session is None or session.registered_at is None:
-            return {"ok": False, "error": "not connected to the Muse"}
+            return {"ok": False, "delivery": "failed", "error": "not connected to the Muse"}
         log.info("forwarding a %d-character message to the Muse", len(message))
         if request.get("stream") is True and on_progress is not None:
             return await session.send_chat(message, session_id, wait_for_reply=True,

@@ -28,3 +28,15 @@ jobs:
       - run: python -m json.tool manifest.json > /dev/null
       # Plugin validation and qmllint need an Omarchy/Quickshell host; they are
       # part of the manual release checklist in SECURITY.md.
+  qml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y qt6-declarative-dev-tools qml6-module-qtquick qml6-module-qttest qml6-module-qtqml-workerscript qml6-module-qtquick-window
+      - run: /usr/lib/qt6/bin/qmltestrunner -input tests/qml
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software

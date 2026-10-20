@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from musegadget import cli
+from musegadget.identity import Identity
 
 
 def test_pairing_requires_token_before_bluetooth_is_imported(monkeypatch, capsys):
@@ -16,6 +20,64 @@ def test_pairing_requires_token_before_bluetooth_is_imported(monkeypatch, capsys
     monkeypatch.setattr(cli.config, "sdk_token", lambda: None)
     assert cli.cmd_pair(argparse.Namespace(force=False, timeout=600)) == 1
     assert "omuseful-token.sh" in capsys.readouterr().err
+
+
+def test_pair_command_wires_the_private_token_into_pairing_without_real_bluetooth(monkeypatch, capsys):
+    token = "mgst_" + "A" * 43
+    captured = {}
+    monkeypatch.setattr(cli.config, "load_json", lambda name: None)
+    monkeypatch.setattr(cli.config, "sdk_token", lambda: token)
+    monkeypatch.setattr(cli.identity, "load_or_create", lambda: Identity("02:00:00:00:00:01"))
+    monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 0))
+
+    def controller(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(start=lambda: None, stop=lambda: None, confirm=lambda generation: True)
+
+    def server(*args, **kwargs):
+        return SimpleNamespace(run=lambda: captured["on_complete"](), stop=lambda: None)
+
+    class Timer:
+        def __init__(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    def no_system_group(name):
+        # Prevent both writes and cleanup against the real /run/omuseful.
+        raise KeyError(name)
+
+    monkeypatch.setitem(sys.modules, "musegadget.ble_server", SimpleNamespace(BleServer=server))
+    monkeypatch.setattr(cli, "SetupController", controller)
+    monkeypatch.setattr(cli.threading, "Timer", Timer)
+    monkeypatch.setattr("grp.getgrnam", no_system_group)
+    monkeypatch.setattr(cli, "_TerminalConfirmation", lambda *args: SimpleNamespace(
+        start=lambda: None, stop=lambda: None, prompt=lambda generation: None,
+        ended=lambda generation, confirmed: None,
+    ))
+    saved = []
+    monkeypatch.setattr(cli, "_verify_and_save", lambda *args, **kwargs: saved.append(kwargs))
+    assert cli.cmd_pair(argparse.Namespace(force=False, timeout=600)) == 0
+    assert captured["pairing"]._sdk_token == token
+    captured["provision"](None, None)
+    assert saved == [{"sdk_token_hint": token[:12]}]
+    output = capsys.readouterr()
+    assert token not in output.out + output.err
+
+
+def test_provision_saves_only_a_token_hint_in_root_only_pairing_state(tmp_path, monkeypatch):
+    token = "mgst_" + "A" * 43
+    monkeypatch.setenv("MUSEGADGET_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cli.muse_api, "fetch_vms_with_status", lambda *args: ([{"vm_id": "synthetic"}], 200))
+    credentials = cli.Credentials("access", "refresh", "synthetic", "", "https://api.muse.ai", "")
+    cli._verify_and_save(credentials, lambda save: save(), sdk_token_hint=token[:12])
+    path = tmp_path / "pairing.json"
+    assert json.loads(path.read_text())["sdk_token_hint"] == token[:12]
+    assert token not in path.read_text() and path.stat().st_mode & 0o777 == 0o600
 
 
 def test_private_token_helper_help_does_not_require_privileges():

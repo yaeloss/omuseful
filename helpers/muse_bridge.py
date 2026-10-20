@@ -31,7 +31,8 @@ MAX_JSON = 128 * 1024
 MAX_MESSAGE = 60 * 1024
 STATUS = Path("/run/omuseful/status.json")
 SOCKET = Path("/run/musegadget/musegadget.sock")
-STATUS_FIELDS = ("paired", "connected", "pairing", "ble_name", "sdk_token_configured", "version")
+STATUS_FIELDS = ("paired", "connected", "pairing", "ble_name", "sdk_token_configured",
+                 "sdk_token_needs_pairing", "version")
 MAX_REPLY = 16384
 # The companion runs as root; never trust a status file or socket owned by anyone else.
 TRUSTED_UID = 0
@@ -217,7 +218,7 @@ def backend_status(path: Path = STATUS) -> dict:
     if type(stamp) not in (int, float) or not -2 <= time.time() - stamp <= 4:
         return {"available": False, "state": "offline", "label": "Companion offline"}
     status = {key: raw[key] for key in STATUS_FIELDS if key in raw}
-    for flag in ("paired", "connected", "pairing", "sdk_token_configured"):
+    for flag in ("paired", "connected", "pairing", "sdk_token_configured", "sdk_token_needs_pairing"):
         status[flag] = raw.get(flag) is True
     if not (isinstance(status.get("version"), str) and len(status["version"]) <= 32):
         status.pop("version", None)
@@ -231,6 +232,9 @@ def backend_status(path: Path = STATUS) -> dict:
         status["label"] = "Connected · " + status["ble_name"]
     else:
         status["label"] = "Paired, offline"
+    # This label also reaches the shell-owned bar tooltip. Neutralize markup
+    # without relying on the host's Text format; other name displays are plain.
+    status["label"] = status["label"].replace("<", "‹").replace(">", "›")
     return status
 
 
@@ -275,6 +279,9 @@ def setup_guide(status: dict, access: bool) -> dict:
     token, then pair with the Muse app. Each step can open Omarchy's floating
     terminal with a fixed command ("run"), or copy it ("command").
     """
+    version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", status.get("version", ""))
+    if version and tuple(map(int, version.groups())) < (0, 1, 4):
+        status = {"available": False, "state": "incompatible"}
     if status.get("available") is not True:
         state = status.get("state")
         body = ("1. Get your SDK token from Muse.\n"
@@ -295,14 +302,18 @@ def setup_guide(status: dict, access: bool) -> dict:
     token = status.get("sdk_token_configured") is True
     paired = status.get("paired") is True
     pairing = status.get("pairing") is True
+    token_changed = status.get("sdk_token_needs_pairing") is True
     if pairing:
         pair_body = "Pairing is open. " + PAIR_STEPS.replace(
             "the MuseGadget name shown in the terminal", status.get("ble_name") or "the name shown in the terminal")
+    elif token_changed:
+        pair_body = "Your SDK token changed. Pair again to register it with Muse. " + PAIR_STEPS
     elif paired:
         pair_body = "Paired with the Muse app."
     else:
         pair_body = "Have your phone nearby. " + PAIR_STEPS
-    can_pair = token and not paired and not pairing
+    can_pair = token and (not paired or token_changed) and not pairing
+    pair_command = PAIR_COMMAND + " --force" if token_changed else PAIR_COMMAND
     steps = [
         {"id": "token", "title": "Add your SDK token", "done": token,
          "body": "Get a token from Muse, click Add token, and paste it when asked "
@@ -312,13 +323,13 @@ def setup_guide(status: dict, access: bool) -> dict:
          "command_label": "Copy command", "command_enabled": True,
          "url": TOKEN_URL, "url_label": "Get SDK token",
          "secondary_url": "https://gadgets.muse.ai/sdk-terms", "secondary_url_label": "Token terms"},
-        {"id": "pair", "title": "Pair with the Muse app", "done": paired, "body": pair_body,
-         "run": PAIR_COMMAND if can_pair else "", "run_label": "Pair",
-         "command": PAIR_COMMAND, "command_label": "Copy command", "command_enabled": can_pair,
+        {"id": "pair", "title": "Pair with the Muse app", "done": paired and not token_changed, "body": pair_body,
+         "run": pair_command if can_pair else "", "run_label": "Pair again" if token_changed else "Pair",
+         "command": pair_command, "command_label": "Copy command", "command_enabled": can_pair,
          "disabled_hint": "Add your SDK token first." if not token else ""},
     ]
     return {"current_step": 0 if not token else 1,
-            "complete": token and paired and status.get("connected") is True and access,
+            "complete": token and paired and not token_changed and status.get("connected") is True and access,
             "steps": steps}
 
 
@@ -331,6 +342,24 @@ def snapshot(status_path: Path = STATUS, socket_path: Path = SOCKET) -> dict:
     return {"status": status, "error": error, "setup": setup_guide(status, access)}
 
 
+class DeliveryError(ValueError):
+    """An interrupted send, with a conservative account of its delivery."""
+
+    def __init__(self, message: str, delivery: str) -> None:
+        super().__init__(message)
+        self.delivery = delivery
+
+
+def delivery_error(delivery: str) -> dict:
+    # Never expose raw exceptions, server errors, or response bodies to the UI.
+    errors = {
+        "failed": "Message not sent. Edit it and try again when Muse is connected.",
+        "uncertain": "Delivery could not be confirmed. Check the Muse app before resending.",
+        "accepted": "Muse accepted the message, but the reply connection stopped. Check the Muse app.",
+    }
+    return {"ok": False, "delivery": delivery, "error": errors[delivery]}
+
+
 def send(message, on_event, status_path: Path = STATUS, socket_path: Path = SOCKET) -> dict:
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message is empty")
@@ -339,49 +368,71 @@ def send(message, on_event, status_path: Path = STATUS, socket_path: Path = SOCK
     body = json.dumps({"message": message, "stream": True}).encode() + b"\n"
     if len(body) > MAX_MESSAGE:
         raise ValueError("message is too long")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(335)
-        sock.connect(str(socket_path))
-        # Talk only to the root companion, never to an impostor on that path.
-        _, peer_uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                                             struct.calcsize("3i")))
-        if peer_uid != TRUSTED_UID:
-            raise ValueError("chat socket is not owned by the companion")
-        sock.sendall(body)
-        with sock.makefile("rb") as stream:
-            for _ in range(10000):
-                raw = stream.readline(MAX_JSON + 1)
-                if len(raw) > MAX_JSON or not raw.endswith(b"\n"):
-                    raise ValueError("invalid service reply")
-                reply = parse(raw)
-                if not isinstance(reply, dict):
-                    raise ValueError("invalid service reply")
-                if "ok" in reply:
-                    break
-                event = reply.get("event")
-                if event == "accepted":
-                    on_event({"event": "accepted"})
-                elif event == "progress" and reply.get("phase") in ("working", "waiting"):
-                    on_event({"event": "progress", "phase": reply["phase"]})
-                elif (event == "reply" and isinstance(reply.get("id"), str)
-                      and 0 < len(reply["id"]) <= 256 and isinstance(reply.get("text"), str)):
-                    # Bound what reaches the shell's main thread, after escaping.
-                    text = visible_text(reply["text"][:MAX_REPLY])[:MAX_REPLY]
-                    on_event({"event": "reply", "id": reply["id"], "text": text,
-                              "html": render_html(text),
-                              "links": link_cards(reply.get("links"), text),
-                              "done": reply.get("done") is True})
-            else:
-                raise ValueError("too many service events")
+    delivery, accepted, has_reply = "failed", False, False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(335)
+            sock.connect(str(socket_path))
+            # Talk only to the root companion, never to an impostor on that path.
+            _, peer_uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                                 struct.calcsize("3i")))
+            if peer_uid != TRUSTED_UID:
+                raise ValueError("chat socket is not owned by the companion")
+            # A partial write or a missing acknowledgement is not proof of
+            # failure. Never encourage an automatic retry of an ambiguous send.
+            delivery = "uncertain"
+            sock.sendall(body)
+            with sock.makefile("rb") as stream:
+                for _ in range(10000):
+                    raw = stream.readline(MAX_JSON + 1)
+                    if len(raw) > MAX_JSON or not raw.endswith(b"\n"):
+                        raise ValueError("invalid service reply")
+                    reply = parse(raw)
+                    if not isinstance(reply, dict):
+                        raise ValueError("invalid service reply")
+                    if "ok" in reply:
+                        if type(reply["ok"]) is not bool:
+                            raise ValueError("invalid delivery result")
+                        break
+                    event = reply.get("event")
+                    if event == "accepted":
+                        accepted = True
+                        on_event({"event": "accepted"})
+                    elif event == "progress" and reply.get("phase") in ("working", "waiting"):
+                        on_event({"event": "progress", "phase": reply["phase"]})
+                    elif (event == "reply" and isinstance(reply.get("id"), str)
+                          and 0 < len(reply["id"]) <= 256 and isinstance(reply.get("text"), str)):
+                        # Bound what reaches the shell's main thread, after escaping.
+                        text = visible_text(reply["text"][:MAX_REPLY])[:MAX_REPLY]
+                        links = link_cards(reply.get("links"), text)
+                        if text or links:
+                            accepted, has_reply = True, True
+                        on_event({"event": "reply", "id": reply["id"], "text": text,
+                                  "html": render_html(text), "links": links,
+                                  "done": reply.get("done") is True})
+                else:
+                    raise ValueError("too many service events")
+    except BrokenPipeError:
+        # A lost stdout consumer is handled by main just like other hangups.
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise DeliveryError(str(exc), "accepted" if accepted else delivery) from exc
     if reply.get("ok") is not True:
-        return {"ok": False, "error": "Muse did not accept the message"}
+        status = reply.get("status")
+        rejected = (reply.get("delivery") == "failed"
+                    or (type(status) is int and 400 <= status < 500 and status != 408))
+        return delivery_error("accepted" if accepted else "failed" if rejected else "uncertain")
     result = {"ok": True}
     for key in ("reply", "warning"):
         if isinstance(reply.get(key), str) and reply[key]:
             result[key] = visible_text(reply[key][:MAX_REPLY])[:MAX_REPLY]
     if "reply" in result:
         result["html"] = render_html(result["reply"])
-        result["links"] = link_cards(reply.get("links"), result["reply"])
+    links = link_cards(reply.get("links"), result.get("reply", ""))
+    if "reply" in result or links:
+        result["links"] = links
+    has_reply = has_reply or bool(result.get("reply") or links)
+    result["delivery"] = "complete" if has_reply and not result.get("warning") else "accepted"
     return result
 
 
@@ -408,8 +459,11 @@ def main() -> int:
             emit(send(data.get("message"), emit))
     except (KeyboardInterrupt, BrokenPipeError):
         return 0
+    except DeliveryError as exc:
+        emit(delivery_error(exc.delivery))
+        return 1
     except (OSError, ValueError, TypeError):
-        emit({"ok": False, "error": "Could not reach Muse. Your message is kept here."})
+        emit(delivery_error("failed"))
         return 1
     return 0
 

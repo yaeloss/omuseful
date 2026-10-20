@@ -60,8 +60,9 @@ system settings.
 4. Follow the on-screen steps to add this computer in the Muse app on your
    phone. When the terminal says a phone requested pairing, check the Muse app
    and press Enter in that terminal to confirm. When it says **Paired**, you're
-   done. The SDK token never crosses Bluetooth, but pair somewhere private so
-   a nearby attacker cannot interfere with the session (see
+   done. After confirmation, your SDK token is sent to the phone inside the
+   encrypted pairing session, as required by the Muse SDK. Pair somewhere
+   private: community pairing cannot authenticate a nearby active attacker (see
    [SECURITY.md](SECURITY.md#pairing)).
 
 Setup installs a small system service. Pairing is the only step that uses
@@ -73,15 +74,34 @@ bash ~/.config/omarchy/plugins/omuseful/companion/omuseful-setup.sh
 
 ## Usage
 
-Click the chat-bubble icon in the bar. It is dimmed until Muse is connected.
+Click the chat-bubble icon in the bar. It dims while disconnected, shows an
+ellipsis while working, and a badge when a reply arrives that you aren't reading.
 
 - **Chat:** type and press Enter (Shift+Enter for a new line). Replies stream
   in with basic formatting and clickable links, and also appear in the Muse
   app. **Copy** puts a message (or a card's link) on the clipboard. While Muse is replying, the send button
-  becomes **Stop**.
+  becomes **Stop waiting**. This ends the local wait, not necessarily Muse's
+  work; its answer may still appear in the Muse app.
+- **Delivery:** each outgoing message shows Sending, Accepted, Replying, or
+  Complete. Confirmed failures offer **Edit & retry**, which restores an editable
+  draft without sending it. An uncertain delivery says to check Muse before
+  resending and offers **Copy to draft**. Existing drafts are never overwritten.
+  You can prepare a draft while offline; sending still requires a connection.
 - **Setup:** shows what is left to do. **Run setup**, **Add token**, and
   **Pair** open a terminal that runs the matching script from the plugin's
   `companion/` folder; each asks before changing anything.
+- **Reply notifications:** optional, off by default; enable them in **Setup**.
+  A completed background turn produces one generic **Muse replied** alert, never
+  message text. It respects Omarchy's Do Not Disturb and snooze settings. Click
+  the alert to open the chat. Reading the latest chat on any monitor clears the
+  unread badge and suppresses alerts; reading older messages doesn't.
+
+After replacing an SDK token, pair again with `sudo musegadget pair --force`.
+Muse records the token during pairing, not during token refresh. The guide
+offers **Pair again** when a saved pairing's token hint no longer matches.
+
+Upgrading from 0.1.2 or 0.1.3? Update the companion using **Run setup** before
+retrying a failed first pairing. See [CHANGELOG.md](CHANGELOG.md).
 
 To open the panel from a keybinding:
 
@@ -91,7 +111,9 @@ omarchy-shell shell toggle omuseful
 
 ## Configure
 
-There are no settings. To move the icon:
+The **Reply notifications** button in Setup saves the `notifyReplies` preference
+in this widget's Omarchy bar entry. It is the only setting; no chats are saved.
+To move the icon:
 
 ```bash
 omarchy bar move omuseful --section right
@@ -120,7 +142,9 @@ device in the Muse app (Settings > Devices).
 - The panel keeps at most 20 messages in memory. They are never written to
   disk and are cleared when the shell or plugin reloads.
 - The plugin never sees your SDK token; the guide shows only whether one is
-  configured. No analytics, telemetry, or hosted relay.
+  configured or needs pairing again. No analytics, telemetry, or hosted relay.
+- Reply notifications contain only fixed text. If enabled, they can appear in
+  Omarchy's notification history, but never include a message, link, or token.
 - Copied text is visible to other clipboard users and clipboard history tools.
 
 See [SECURITY.md](SECURITY.md) for the threat model.
@@ -128,16 +152,28 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 ## Development
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install pytest ruff -e companion
-.venv/bin/python -m pytest                      # plugin + companion contract
-.venv/bin/python -m pytest companion/tests      # companion
-.venv/bin/ruff check helpers tests companion/src companion/tests
+VENV="${XDG_CACHE_HOME:-$HOME/.cache}/omuseful-dev"
+python3 -m venv "$VENV"
+"$VENV/bin/pip" install pytest ruff -e companion
+"$VENV/bin/python" -m pytest                      # plugin + companion contract
+"$VENV/bin/python" -m pytest companion/tests      # companion
+"$VENV/bin/ruff" check helpers tests companion/src companion/tests
 omarchy plugin validate .
-qmllint -I "$OMARCHY_PATH/shell" *.qml
+/usr/lib/qt6/bin/qmllint -I "$OMARCHY_PATH/shell" *.qml
 ```
 
+Keep virtual environments outside the plugin folder: Omarchy correctly rejects
+their symlinks. If you already have a local `.venv`, validate a clean source
+export rather than copying that environment into the installed plugin.
+
+The pytest suite runs `tests/qml/tst_ChatState.qml` when Qt Quick Test is installed
+(Qt 6 `qmltestrunner`, on Arch from `qt6-declarative`). It tests real QML delivery
+states, interrupted streams, unread tracking across monitors, and completion
+events without a companion, Bluetooth, credentials, or network. CI runs it in a
+separate Qt 6 job as well.
+
 To try a local checkout, copy it (not a symlink) into
-`~/.config/omarchy/plugins/omuseful/`, then run
+`~/.config/omarchy/plugins/omuseful/`, excluding `.venv` and generated caches, then run
 `omarchy-shell shell rescanPlugins`. Before a release, run the manual check in
 [SECURITY.md](SECURITY.md#release-checklist).
 

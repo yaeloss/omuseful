@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omuseful",
   "name": "Omuseful",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "yaeloss",
   "license": "MIT",
   "description": "Chat with your Muse from the Omarchy bar. Includes a chat-only companion set up with one command; Muse can't run anything on this computer.",

@@ -80,16 +80,25 @@ def test_only_a_fresh_chat_only_companion_is_available(tmp_path, fields, state):
 
 def test_status_projects_only_known_non_secret_fields(tmp_path):
     path = write_status(tmp_path / "status.json", sdk_token="PRIVATE-SYNTHETIC",
+                        sdk_token_hint="PRIVATE-HINT", sdk_token_needs_pairing="PRIVATE-SYNTHETIC",
                         account_home="/var/lib/muse", sdk_token_configured="PRIVATE-SYNTHETIC")
     result = bridge.backend_status(path)
     assert result["available"] and result["label"] == "Connected · MuseGadgetABCDEF"
     assert result["sdk_token_configured"] is False
+    assert result["sdk_token_needs_pairing"] is False
     assert "PRIVATE" not in json.dumps(result) and "account_home" not in result
 
 
 def test_device_name_cannot_inject_controls(tmp_path):
     path = write_status(tmp_path / "status.json", ble_name="Muse\u202egnp.exe\x1b")
     assert bridge.backend_status(path)["ble_name"] == "Muse\\u202egnp.exe\\u001b"
+
+
+def test_device_name_cannot_inject_markup_into_the_shared_bar_tooltip(tmp_path):
+    path = write_status(tmp_path / "status.json", ble_name='<img src="https://tracker.example/pixel">')
+    status = bridge.backend_status(path)
+    assert "<" not in status["label"] and ">" not in status["label"]
+    assert "‹img" in status["label"]
 
 
 @pytest.mark.parametrize("raw", ['{"a":1,"a":2}', '{"value":NaN}', "[]"])
@@ -185,7 +194,7 @@ def test_stream_projects_only_safe_events(status):
     with directory:
         result = bridge.send("synthetic hello", events.append, status, path)
         worker.join()
-    assert result == {"ok": True, "reply": "Hello world", "html": "Hello world", "links": []}
+    assert result == {"ok": True, "delivery": "complete", "reply": "Hello world", "html": "Hello world", "links": []}
     assert received == [{"message": "synthetic hello", "stream": True}]
     assert [event["event"] for event in events] == ["accepted", "progress", "reply", "reply"]
     assert "PRIVATE" not in json.dumps(events)
@@ -196,16 +205,17 @@ def test_final_only_reply_is_accepted(status):
     path, worker, directory = serve_once([{"ok": True, "reply": "Only final"}], received)
     with directory:
         assert bridge.send("hi", events.append, status, path) == {
-            "ok": True, "reply": "Only final", "html": "Only final", "links": []}
+            "ok": True, "delivery": "complete", "reply": "Only final", "html": "Only final", "links": []}
         worker.join()
     assert events == []
 
 
-def test_rejected_message_returns_generic_error(status):
+def test_unknown_failure_is_not_misrepresented_as_a_safe_retry(status):
     path, worker, directory = serve_once([{"ok": False, "error": "PRIVATE detail"}], [])
     with directory:
-        assert bridge.send("hi", lambda event: None, status, path) == {
-            "ok": False, "error": "Muse did not accept the message"}
+        result = bridge.send("hi", lambda event: None, status, path)
+        assert result["delivery"] == "uncertain" and result["ok"] is False
+        assert "PRIVATE" not in result["error"] and "before resending" in result["error"]
         worker.join()
 
 
@@ -224,6 +234,79 @@ def test_disconnected_companion_never_opens_socket(tmp_path):
 def test_oversized_message_is_rejected(status):
     with pytest.raises(ValueError, match="too long"):
         bridge.send("x" * (bridge.MAX_MESSAGE + 1), lambda event: None, status, Path("/nonexistent"))
+
+
+@pytest.mark.parametrize("reply,delivery", [
+    ({"ok": False, "delivery": "failed"}, "failed"),
+    ({"ok": False, "status": 401}, "failed"),
+    ({"ok": False, "status": 429}, "failed"),
+    ({"ok": False, "status": 408}, "uncertain"),
+    ({"ok": False, "status": 503}, "uncertain"),
+    ({"ok": False, "status": "401"}, "uncertain"),
+    ({"ok": True}, "accepted"),
+    ({"ok": True, "reply": "Partial", "warning": "Reply timed out"}, "accepted"),
+])
+def test_delivery_is_classified_conservatively(status, reply, delivery):
+    path, worker, directory = serve_once([reply], [])
+    with directory:
+        assert bridge.send("hi", lambda event: None, status, path)["delivery"] == delivery
+        worker.join()
+
+
+@pytest.mark.parametrize("events,delivery", [
+    ([], "uncertain"),
+    ([{"event": "accepted"}], "accepted"),
+    ([{"event": "reply", "id": "r", "text": "Partial", "done": False}], "accepted"),
+])
+def test_socket_hangup_preserves_what_is_known_about_delivery(status, events, delivery):
+    path, worker, directory = serve_once(events, [])
+    with directory:
+        with pytest.raises(bridge.DeliveryError) as error:
+            bridge.send("hi", lambda event: None, status, path)
+        worker.join()
+    assert error.value.delivery == delivery
+
+
+def test_connection_failure_before_sending_is_safe_to_retry(status, tmp_path):
+    with pytest.raises(bridge.DeliveryError) as error:
+        bridge.send("hi", lambda event: None, status, tmp_path / "absent")
+    assert error.value.delivery == "failed"
+
+
+def test_a_failure_after_acceptance_cannot_become_a_safe_retry(status):
+    path, worker, directory = serve_once([
+        {"event": "accepted"}, {"ok": False, "delivery": "failed", "error": "PRIVATE"},
+    ], [])
+    with directory:
+        result = bridge.send("hi", lambda event: None, status, path)
+        worker.join()
+    assert result["delivery"] == "accepted" and "PRIVATE" not in result["error"]
+
+
+def test_a_final_card_only_reply_is_complete(status):
+    path, worker, directory = serve_once([
+        {"ok": True, "links": [{"url": "https://shop.example/item", "title": "Listing"}]},
+    ], [])
+    with directory:
+        result = bridge.send("hi", lambda event: None, status, path)
+        worker.join()
+    assert result["delivery"] == "complete" and result["links"][0]["domain"] == "shop.example"
+
+
+def test_changed_token_offers_explicit_repair_instead_of_claiming_setup_is_done():
+    status = {"available": True, "paired": True, "connected": True,
+              "sdk_token_configured": True, "sdk_token_needs_pairing": True}
+    guide = bridge.setup_guide(status, True)
+    pair = guide["steps"][1]
+    assert not guide["complete"] and not pair["done"]
+    assert pair["run"] == "sudo musegadget pair --force"
+    assert pair["command_enabled"] is True
+
+
+def test_old_companion_is_offered_the_bundled_update_before_pairing():
+    guide = bridge.setup_guide({"available": True, "version": "0.1.3"}, True)
+    assert not guide["complete"]
+    assert guide["steps"][0]["id"] == "setup" and "update" in guide["steps"][0]["body"]
 
 
 # -- Rich replies ----------------------------------------------------------------

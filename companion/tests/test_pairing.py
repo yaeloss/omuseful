@@ -91,7 +91,7 @@ class Mobile:
 
 
 def make_device(
-    vector: dict = APP, clock: FakeClock | None = None,
+    vector: dict = APP, clock: FakeClock | None = None, sdk_token: str | None = None,
 ) -> PairingSession:
     scalar = int(vector["device_private_scalar_hex"], 16)
     return PairingSession(
@@ -99,6 +99,7 @@ def make_device(
         device_id=vector["device_id"],
         mac=vector["mac"],
         firmware_version=vector["firmware_version"],
+        sdk_token=sdk_token,
         clock=clock or FakeClock(),
         generate_key=lambda: ec.derive_private_key(scalar, ec.SECP256R1()),
         random_bytes=lambda n: unb64(vector["device_nonce"]),
@@ -249,21 +250,39 @@ def test_full_app_confirmed_handshake():
     assert json.loads(scan) == {"action": "wifi_scan"}
 
 
-def test_pairing_status_never_carries_an_sdk_token():
-    device = make_device()
-    device.handle_hello(hello())
+def test_sdk_token_is_only_in_the_encrypted_locally_confirmed_status():
+    token = "mgst_" + "A" * 43  # synthetic, never a real credential
+    device = make_device(sdk_token=token)
+    assert token not in json.dumps(device.device_info())
+    assert token not in json.dumps(device.handle_hello(hello()))
     pending = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
     mobile = Mobile(APP)
     assert mobile.open(device.encrypt_status("confirm_required", pending)) == {
         "type": "status", "status": "confirm_required",
     }
+    # Even an early/mistaken call must not disclose the token before consent.
+    assert "sdk_token" not in mobile.open(device.encrypt_status("pairing_confirmed", pending))
     generation = device.confirm(pending)
-    assert mobile.open(device.encrypt_status("pairing_confirmed", generation)) == {
-        "type": "status", "status": "pairing_confirmed",
+    envelope = device.encrypt_status("pairing_confirmed", generation)
+    assert token not in json.dumps(envelope)
+    assert mobile.open(envelope) == {
+        "type": "status", "status": "pairing_confirmed", "sdk_token": token,
     }
     assert mobile.open(device.encrypt_status("wifi_connecting", generation)) == {
         "type": "status", "status": "wifi_connecting",
     }
+
+
+def test_expired_or_replaced_pairing_cannot_disclose_the_sdk_token():
+    clock = FakeClock()
+    device = make_device(clock=clock, sdk_token="SYNTHETIC-TOKEN")
+    device.handle_hello(hello())
+    pending = device.handle_client_finished(json.loads(device.decrypt(client_finished_record())))
+    generation = device.confirm(pending)
+    clock.now += 121
+    assert device.encrypt_status("pairing_confirmed", generation) is None
+    device.handle_hello(hello())
+    assert device.encrypt_status("pairing_confirmed", generation) is None
 
 
 def test_device_records_count_up_from_zero():

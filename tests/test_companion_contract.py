@@ -6,6 +6,7 @@ Run with PYTHONPATH=companion/src (as CI does); skipped if it is not importable.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -32,3 +33,23 @@ def test_companion_status_is_read_as_chat_only(tmp_path, monkeypatch):
 def test_companion_registers_no_commands_and_refuses_any():
     assert service.OMUSEFUL_COMMAND_SPECS == {}
     assert service.refuse_command("system.run", {"command": "id"})["ok"] is False
+
+
+def test_token_change_projects_only_a_boolean_into_the_plugin(tmp_path, monkeypatch):
+    token = "mgst_" + "B" * 43
+    hint = "mgst_AAAAAAA"
+    monkeypatch.setenv("MUSEGADGET_STATE_DIR", str(tmp_path / "private"))
+    monkeypatch.setattr(bridge, "TRUSTED_UID", os.getuid())
+    service.config.save_json(service.config.PAIRING_FILE, {"sdk_token_hint": hint})
+    chat = companion.ChatStatus(paths=companion.Paths(tmp_path / "run"),
+                                gid=os.getgid(), owner_uid=os.getuid())
+    chat.prepare()
+    backend = service.Service(identity=service.Identity("02:00:00:00:00:01"), chat=chat, sdk_token=token)
+    backend._write_status(connected=True)
+    raw = (chat.paths.runtime / "status.json").read_text()
+    assert token not in raw and hint not in raw
+    status = bridge.backend_status(chat.paths.runtime / "status.json")
+    assert status["sdk_token_needs_pairing"] is True
+    assert "sdk_token_hint" not in json.dumps(status)
+    guide = bridge.setup_guide(status, True)
+    assert not guide["complete"] and guide["steps"][1]["run"] == "sudo musegadget pair --force"

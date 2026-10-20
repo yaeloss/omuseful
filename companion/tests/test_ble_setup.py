@@ -71,10 +71,10 @@ IDENTITY = Identity(APP["mac"])
 
 class Harness:
     def __init__(self, online: bool = True, provision=None, mtu: int = 185,
-                 confirm_timeout_s: float = 60, clock=None) -> None:
+                 confirm_timeout_s: float = 60, clock=None, sdk_token=None) -> None:
         self.transport = FakeTransport(mtu)
         self.network = FakeNetwork(online)
-        self.pairing = make_device(clock=clock) if clock else make_device()
+        self.pairing = make_device(clock=clock, sdk_token=sdk_token)
         self.saved: list = []
         self.completed = threading.Event()
         self.confirmation_generation = 0
@@ -180,6 +180,25 @@ def test_full_setup_flow():
     assert (saved.api_url, saved.api_url_v2) == (
         "https://legacy-api.example", "https://api.example")
     assert h.pairing.state is PairingState.PROVISIONING
+
+
+def test_phone_receives_the_sdk_token_only_after_terminal_confirmation():
+    token = "mgst_" + "A" * 43
+    h = Harness(mtu=23, sdk_token=token)
+    h.send({"action": "get_device_info"})
+    h.send(hello())
+    assert token not in json.dumps(h.transport.messages)
+    h.send(client_finished_record())
+    assert h.statuses() == ["confirm_required"]
+    assert all("sdk_token" not in record for record in h.opened())
+    assert h.controller.confirm(h.confirmation_generation)
+    confirmed = next(record for record in h.opened() if record.get("status") == "pairing_confirmed")
+    assert confirmed["sdk_token"] == token
+    assert token not in json.dumps(h.transport.messages)
+    h.mobile.tx_counter = 1
+    h.send_encrypted(PROVISION)
+    h.wait_for_status("auth_ok")
+    assert h.completed.is_set() and len(h.saved) == 1
 
 
 def test_setup_commands_need_encryption():

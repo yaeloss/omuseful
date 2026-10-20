@@ -10,7 +10,9 @@ Panel {
   property Item anchorItem: null
   property var hostWidget: null
   property var service: null
+  property var readerService: null
   property string currentView: "chat"
+  property string draftNotice: ""
   readonly property color foreground: Theme.Color.popups.text
   readonly property bool connected: service && service.connected
   readonly property bool sending: service && service.chatBusy
@@ -20,9 +22,33 @@ Panel {
   function submitMessage() {
     if (!root.connected || !root.service || root.service.chatBusy) return
     if (root.service.send(messageField.text)) {
+      root.draftNotice = ""
       messageField.text = ""
       Qt.callLater(scrollToLatest)
     }
+  }
+
+  function restoreMessage(id, uncertain) {
+    if (!root.service) return
+    if (messageField.text.trim() !== "") {
+      root.draftNotice = "Your current draft is kept. Send or clear it before editing another message."
+      messageField.forceActiveFocus()
+      return
+    }
+    var text = root.service.messageForRetry(id)
+    if (!text) return
+    messageField.text = text
+    root.draftNotice = uncertain ? "Delivery was uncertain. Check the Muse app before sending this draft again."
+      : "Message restored as a draft. Edit it, then press Send to retry."
+    messageField.forceActiveFocus()
+  }
+
+  function updateReader() {
+    if (root.readerService && root.readerService !== root.service)
+      root.readerService.setReader(root, false)
+    root.readerService = root.service
+    if (root.service) root.service.setReader(root,
+      root.opened && root.currentView === "chat" && conversation.followLatest)
   }
 
   function openLink(link) {
@@ -73,7 +99,13 @@ Panel {
   // message. Scrolling up to read an older reply must not jump them to the end.
   onChatCountChanged: if (conversation.followLatest) Qt.callLater(scrollToLatest)
   onSendingChanged: if (conversation.followLatest) Qt.callLater(scrollToLatest)
-  onOpenedChanged: if (opened && currentView === "chat") Qt.callLater(scrollToLatest)
+  onOpenedChanged: {
+    root.updateReader()
+    if (opened && currentView === "chat") Qt.callLater(scrollToLatest)
+  }
+  onCurrentViewChanged: root.updateReader()
+  onServiceChanged: Qt.callLater(root.updateReader)
+  Component.onDestruction: if (root.readerService) root.readerService.setReader(root, false)
 
   KeyboardPanel {
     id: panel
@@ -238,6 +270,7 @@ Panel {
         Flickable {
           id: conversation
           property bool followLatest: true
+          onFollowLatestChanged: root.updateReader()
           readonly property bool nearLatest: contentY >= contentHeight - height - Theme.Style.space(48)
           anchors.top: connectionNotice.bottom
           anchors.topMargin: connectionNotice.visible ? Theme.Style.space(12) : 0
@@ -300,6 +333,8 @@ Panel {
               delegate: Item {
                 id: chatRow
                 required property string role
+                required property string messageId
+                required property string deliveryState
                 required property string messageText
                 required property string messageHtml
                 required property string messageLinks
@@ -310,7 +345,7 @@ Panel {
                 }
                 readonly property bool fromMuse: role === "assistant"
                 width: transcript.width
-                height: bubble.height + cards.height + copyButton.implicitHeight + Theme.Style.space(3)
+                height: messageActions.y + messageActions.implicitHeight
                 Rectangle {
                   id: bubble
                   // A reply can be only a link card, with no text bubble.
@@ -413,31 +448,60 @@ Panel {
                     }
                   }
                 }
-                Button {
-                  id: copyButton
-                  y: bubble.height + cards.height + Theme.Style.space(3)
-                  anchors.left: chatRow.fromMuse ? parent.left : undefined
-                  anchors.right: chatRow.fromMuse ? undefined : parent.right
-                  text: "Copy"
-                  fontSize: Theme.Style.font.caption
-                  verticalPadding: Theme.Style.space(3)
-                  foreground: root.foreground
-                  focusable: true
-                  tooltipText: bubbleText.selectedText ? "Copy selected text" : "Copy this message"
-                  onClicked: if (root.service) root.service.copyMessage(bubbleText.selectedText || chatRow.messageText
-                    || chatRow.links.map(function(link) { return link.url }).join("\n"))
-                }
                 Text {
-                  visible: chatRow.partial && !root.sending
-                  y: copyButton.y
-                  anchors.left: copyButton.right
-                  anchors.leftMargin: Theme.Style.space(8)
-                  text: "Partial reply"
+                  id: deliveryLabel
+                  y: bubble.height + cards.height + Theme.Style.space(3)
+                  width: chatRow.width * 0.88
+                  anchors.right: parent.right
+                  visible: !chatRow.fromMuse
+                  height: visible ? implicitHeight : 0
+                  text: root.service ? root.service.deliveryLabel(chatRow.deliveryState) : ""
                   textFormat: Text.PlainText
-                  color: root.foreground
-                  opacity: 0.6
+                  wrapMode: Text.Wrap
+                  horizontalAlignment: Text.AlignRight
+                  color: chatRow.deliveryState === "failed" ? Theme.Color.urgent : root.foreground
+                  opacity: 0.7
                   font.family: Theme.Style.font.family
                   font.pixelSize: Theme.Style.font.caption
+                }
+                Row {
+                  id: messageActions
+                  y: deliveryLabel.y + deliveryLabel.height + Theme.Style.space(3)
+                  anchors.left: chatRow.fromMuse ? parent.left : undefined
+                  anchors.right: chatRow.fromMuse ? undefined : parent.right
+                  spacing: Theme.Style.space(8)
+                  Button {
+                    id: copyButton
+                    text: "Copy"
+                    fontSize: Theme.Style.font.caption
+                    verticalPadding: Theme.Style.space(3)
+                    foreground: root.foreground
+                    focusable: true
+                    tooltipText: bubbleText.selectedText ? "Copy selected text" : "Copy this message"
+                    onClicked: if (root.service) root.service.copyMessage(bubbleText.selectedText || chatRow.messageText
+                      || chatRow.links.map(function(link) { return link.url }).join("\n"))
+                  }
+                  Button {
+                    visible: !chatRow.fromMuse && (chatRow.deliveryState === "failed" || chatRow.deliveryState === "uncertain")
+                    text: chatRow.deliveryState === "failed" ? "Edit & retry" : "Copy to draft"
+                    fontSize: Theme.Style.font.caption
+                    verticalPadding: Theme.Style.space(3)
+                    foreground: root.foreground
+                    focusable: true
+                    tooltipText: chatRow.deliveryState === "failed" ? "Restore as an editable draft; nothing is sent automatically"
+                      : "Check Muse before resending; delivery is uncertain"
+                    onClicked: root.restoreMessage(chatRow.messageId, chatRow.deliveryState === "uncertain")
+                  }
+                  Text {
+                    visible: chatRow.partial && !root.sending
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Partial reply"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.6
+                    font.family: Theme.Style.font.family
+                    font.pixelSize: Theme.Style.font.caption
+                  }
                 }
               }
             }
@@ -465,7 +529,7 @@ Panel {
 
         Item {
           id: feedback
-          readonly property string message: root.service ? (root.service.error || root.service.chatMessage || root.service.message) : ""
+          readonly property string message: root.draftNotice || (root.service ? (root.service.error || root.service.chatMessage || root.service.message) : "")
           width: parent.width
           anchors.bottom: composer.top
           anchors.bottomMargin: visible ? Theme.Style.space(8) : 0
@@ -508,7 +572,7 @@ Panel {
             Controls.TextArea {
               id: messageField
               width: composerScroll.availableWidth
-              placeholderText: root.connected ? "Message Muse…" : "Connect Muse to send a message"
+              placeholderText: root.connected ? "Message Muse…" : "Draft a message while Muse is offline…"
               textFormat: TextEdit.PlainText
               wrapMode: TextEdit.Wrap
               selectByMouse: true
@@ -518,7 +582,6 @@ Panel {
               selectedTextColor: root.foreground
               font.family: Theme.Style.font.family
               font.pixelSize: Theme.Style.font.body
-              enabled: root.connected
               background: Item { }
               // Enter sends, Shift+Enter adds a line; Ctrl+V pastes.
               Keys.onPressed: function(event) {
@@ -542,7 +605,7 @@ Panel {
             background: Theme.Util.alpha(Theme.Color.accent, 0.2)
             foreground: root.foreground
             focusable: true
-            tooltipText: root.sending ? "Stop waiting for this reply" : "Send · Enter"
+            tooltipText: root.sending ? "Stop waiting · Muse may continue in its app" : "Send · Enter"
             enabled: root.sending || (root.connected && root.service && messageField.text.trim() !== "")
             opacity: enabled ? 1 : 0.4
             onClicked: root.sending ? root.service.stopChat() : root.submitMessage()
@@ -591,6 +654,28 @@ Panel {
               service: root.service
               foreground: root.foreground
               onTerminalRequested: root.close()
+            }
+            Column {
+              width: parent.width
+              spacing: Theme.Style.space(6)
+              Button {
+                text: root.service && root.service.notificationsEnabled ? "Reply notifications: On" : "Reply notifications: Off"
+                selected: root.service && root.service.notificationsEnabled
+                foreground: root.foreground
+                focusable: true
+                enabled: !!root.hostWidget && !!root.service
+                onClicked: root.hostWidget.setReplyNotifications(!root.service.notificationsEnabled)
+              }
+              Text {
+                width: parent.width
+                text: "Optional desktop alerts say only ‘Muse replied’, never show chat text, and respect Do Not Disturb. The bar always shows unread replies."
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: root.foreground
+                opacity: 0.65
+                font.family: Theme.Style.font.family
+                font.pixelSize: Theme.Style.font.caption
+              }
             }
             Text {
               width: parent.width

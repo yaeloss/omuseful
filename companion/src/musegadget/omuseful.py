@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA = 1
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 CHAT_GROUP = "omuseful"
 MAX_JSON = 128 * 1024
 USERNAME = re.compile(r"[a-z_][a-z0-9_-]*\$?")
@@ -138,10 +138,12 @@ class ChatStatus:
             pass
 
     def write_status(self, *, paired: bool, connected: bool, ble_name: str,
-                     pairing: bool = False, sdk_token_configured: bool = False) -> None:
+                     pairing: bool = False, sdk_token_configured: bool = False,
+                     sdk_token_needs_pairing: bool = False) -> None:
         atomic_json(self.paths.runtime / "status.json", {
             "schema_version": SCHEMA, "backend": "omuseful", "version": VERSION,
             "chat_only": True, "paired": paired, "connected": connected,
             "pairing": pairing, "ble_name": ble_name,
-            "sdk_token_configured": sdk_token_configured, "updated_at": time.time(),
+            "sdk_token_configured": sdk_token_configured,
+            "sdk_token_needs_pairing": sdk_token_needs_pairing, "updated_at": time.time(),
         }, 0o644, self.gid)

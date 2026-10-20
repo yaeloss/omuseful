@@ -9,14 +9,14 @@ Item {
   property var shell: null
   property var snapshot: ({ status: {}, error: "" })
   property string message: ""
-  property alias chatMessages: chatStore
-  readonly property int chatCount: chatStore.count
-  property string chatMessage: ""
-  property string chatPhase: ""
-  property string chatTurn: ""
+  property alias chatMessages: chatState.messages
+  readonly property int chatCount: chatState.count
+  readonly property string chatMessage: chatState.message
+  readonly property string chatPhase: chatState.phase
   property string chatPayload: ""
-  property bool chatFinished: false
-  property bool chatStreamed: false
+  property bool chatStarted: false
+  property bool notificationsEnabled: false
+  readonly property int unreadCount: chatState.unreadCount
   property string clipboardText: ""
   property string clipboardPurpose: ""
   property bool shuttingDown: false
@@ -25,7 +25,7 @@ Item {
   readonly property var helperCommand: ["/usr/bin/python3", "-I", "-B",
     decodeURIComponent(Qt.resolvedUrl("helpers/muse_bridge.py").toString().replace("file://", ""))]
   readonly property var status: snapshot.status || ({})
-  readonly property bool chatBusy: chatProcess.running
+  readonly property bool chatBusy: chatProcess.running || chatState.pending
   readonly property string chatStatus: chatPhase === "sending" ? "Sending to Muse…"
     : chatPhase === "replying" ? "Muse is replying…"
     : chatPhase === "working" ? "Muse is working…"
@@ -34,6 +34,12 @@ Item {
   readonly property string statusLabel: status.label || "Checking companion…"
   readonly property string error: snapshot.error || ""
   readonly property var setup: snapshot.setup || ({ steps: [], current_step: 0, complete: false })
+  readonly property string barStatus: root.chatBusy ? root.chatStatus
+    : root.unreadCount > 0 ? "Unread Muse reply · " + root.statusLabel : root.statusLabel
+
+  function setReader(reader, active) { chatState.setReader(reader, active) }
+  function deliveryLabel(state) { return chatState.deliveryLabel(state) }
+  function messageForRetry(id) { return chatState.retryText(id) }
 
   function copyCommand(text) { root.copyText(text, "command") }
   function copyMessage(text) { root.copyText(text, "message") }
@@ -91,13 +97,10 @@ Item {
   function send(text) {
     if (!String(text).trim() || !root.connected || root.chatBusy) return false
     var clean = String(text).trim()
-    root.chatTurn = String(Date.now())
+    if (!chatState.begin(clean)) return false
+    root.chatStarted = false
     root.chatPayload = clean
-    root.chatMessage = ""
-    root.chatPhase = "sending"
-    root.chatFinished = false
-    root.chatStreamed = false
-    root.appendChat("user", root.chatTurn, clean, false)
+    chatTimeout.restart()
     chatProcess.command = root.helperCommand.concat(["send"])
     chatProcess.running = true
     return true
@@ -106,57 +109,44 @@ Item {
   function stopChat() {
     if (!root.chatBusy) return
     // Closing the helper closes the socket; the companion then cancels the turn.
-    root.chatFinished = true
-    root.chatMessage = "Stopped waiting. Muse's reply will still appear in the Muse app."
+    chatState.interrupt("Stopped waiting. Muse may continue in its app. Check there before resending.")
     chatProcess.running = false
-  }
-
-  function appendChat(role, id, text, partial, html, links) {
-    chatStore.append({ role: role, messageId: id, messageText: text, messageHtml: html || "",
-                       messageLinks: JSON.stringify(Array.isArray(links) ? links : []), partial: partial })
-    if (chatStore.count > 20) chatStore.remove(0, chatStore.count - 20)
   }
 
   function receiveChat(line) {
     try {
-      var reply = JSON.parse(line)
-      if (!reply || typeof reply !== "object") return
-      if (reply.event === "accepted") {
-        root.chatPhase = "waiting"
-      } else if (reply.event === "progress") {
-        root.chatPhase = reply.phase === "working" ? "working" : "waiting"
-      } else if (reply.event === "reply" && typeof reply.text === "string" && typeof reply.id === "string") {
-        root.chatStreamed = true
-        root.chatPhase = reply.done === true ? "working" : "replying"
-        var id = root.chatTurn + ":" + reply.id
-        var found = -1
-        for (var i = 0; i < chatStore.count; i++) {
-          if (chatStore.get(i).messageId === id) { found = i; break }
-        }
-        var html = typeof reply.html === "string" ? reply.html : ""
-        var links = Array.isArray(reply.links) ? reply.links : []
-        if (found < 0) root.appendChat("assistant", id, reply.text, reply.done !== true, html, links)
-        else {
-          chatStore.setProperty(found, "messageText", reply.text)
-          chatStore.setProperty(found, "messageHtml", html)
-          chatStore.setProperty(found, "messageLinks", JSON.stringify(links))
-          chatStore.setProperty(found, "partial", reply.done !== true)
-        }
-      } else if (typeof reply.ok === "boolean") {
-        root.chatFinished = true
-        var text = typeof reply.reply === "string" ? reply.reply : ""
-        if (reply.ok && text && !root.chatStreamed)
-          root.appendChat("assistant", root.chatTurn + ":final", text, false,
-                          typeof reply.html === "string" ? reply.html : "",
-                          Array.isArray(reply.links) ? reply.links : [])
-        root.chatMessage = reply.ok
-          ? (reply.warning || (!text && !root.chatStreamed ? "Sent to Muse, but no reply text arrived. Check the Muse app." : ""))
-          : (reply.error || "Could not send the message. Your chat is kept here.")
-        root.chatPhase = ""
-      }
+      chatState.receive(JSON.parse(line))
     } catch (e) {
-      root.chatMessage = "The chat bridge returned an invalid update. Any partial reply is kept."
+      chatState.message = "The chat bridge returned an invalid update. Any partial reply is kept."
     }
+  }
+
+  function finishChatProcess() {
+    chatTimeout.stop()
+    chatProcess.stdinEnabled = true
+    root.chatPayload = ""
+    if (!root.chatStarted)
+      chatState.receive({ ok: false, delivery: "failed", error: "The local chat bridge could not start. Your message was not sent." })
+    else
+      chatState.interrupt("The reply connection stopped. Any partial text is kept; check the Muse app before resending.")
+  }
+
+  ChatState {
+    id: chatState
+    onReplyReady: {
+      if (root.notificationsEnabled && !root.shuttingDown && !notificationProcess.running)
+        notificationProcess.running = true
+    }
+  }
+
+  Process {
+    id: notificationProcess
+    // Fixed text and a fixed click action only: no chat, link, credential, or
+    // remote-provided command ever becomes a notification or process argument.
+    // Normal urgency goes through Omarchy's own DND/snooze handling.
+    command: ["omarchy", "notification", "send", "--app-name", "Omuseful", "-u", "normal",
+      "-t", "8000", "Muse replied", "Open Omuseful to read the reply.",
+      "--exec", "omarchy-shell", "shell", "summon", "omuseful"]
   }
 
   Process {
@@ -176,24 +166,27 @@ Item {
     onTriggered: if (!root.shuttingDown) watcher.running = true
   }
 
-  ListModel { id: chatStore }
-
   Process {
     id: chatProcess
     stdinEnabled: true
     onStarted: {
+      root.chatStarted = true
       chatProcess.write(JSON.stringify({ message: root.chatPayload }) + "\n")
       chatProcess.stdinEnabled = false
       root.chatPayload = ""
       chatTimeout.restart()
     }
     stdout: SplitParser { onRead: function(line) { root.receiveChat(line) } }
-    onExited: {
-      chatTimeout.stop()
-      chatProcess.stdinEnabled = true
-      if (!root.chatFinished)
-        root.chatMessage = root.chatMessage || "The reply connection stopped. Any partial text is kept; check the Muse app."
-      root.chatPhase = ""
+    onExited: root.finishChatProcess()
+    onRunningChanged: {
+      // A failed process start may not produce exited. Defer until stdout and
+      // the normal exit handler have drained, and never affect a newer turn.
+      if (!running && chatState.pending) {
+        var turn = chatState.turn
+        Qt.callLater(function() {
+          if (!chatProcess.running && chatState.turn === turn) root.finishChatProcess()
+        })
+      }
     }
   }
 
@@ -201,8 +194,7 @@ Item {
     id: chatTimeout
     interval: 420000
     onTriggered: {
-      root.chatMessage = "Muse is taking longer than expected. Any partial text is kept; check the Muse app."
-      root.chatFinished = true
+      chatState.interrupt("Muse is taking longer than expected. Any partial text is kept; check the Muse app before resending.")
       chatProcess.running = false
     }
   }

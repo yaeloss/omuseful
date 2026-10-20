@@ -46,4 +46,4 @@ sudo install -d -o root -g root -m 0700 /var/lib/musegadget
 printf '%s\n' "$TOKEN" | sudo install -o root -g root -m 0600 /dev/stdin /var/lib/musegadget/sdk_token
 unset TOKEN
 sudo systemctl restart musegadget
-printf '%s\n' 'Token saved. Next, pair with the Muse app: sudo musegadget pair'
+printf '%s\n' 'Token saved. Pair again to use it: sudo musegadget pair --force'

@@ -15,8 +15,10 @@ installs or starts the companion; you run its setup yourself, once.
 | Read companion status | `/run/omuseful/status.json`: `O_NOFOLLOW`, regular file, owned by root, not world-writable, ≤128 KiB, strict JSON | Only known, non-secret fields are kept |
 | Send chat | JSON line to `/run/musegadget/musegadget.sock`; the peer must be root (`SO_PEERCRED`) | ≤60 KiB message; ≤128 KiB per reply line; ≤16 KiB of reply text shown |
 | Copy text | `wl-copy`, text on stdin | Never in arguments or a shell |
-| Run setup | Omarchy's floating installer terminal, running a fixed script from `companion/` (setup, token, or `sudo musegadget pair`) | Only commands the setup guide offers; the script asks to continue and `sudo` asks for your password |
+| Run setup | Omarchy's floating installer terminal, running a fixed script from `companion/` (setup, token, or `sudo musegadget pair`, optionally `--force` for a changed token) | Only commands the setup guide offers; the script asks to continue and `sudo` asks for your password |
 | Open links | Setup: fixed `https://gadgets.muse.ai/` pages. Replies: `http(s)` links, only when clicked | Checked in the helper and again in QML |
+| Reply notification | Opt-in `omarchy notification send`, normal urgency, fixed headline/body and fixed `omarchy-shell shell summon omuseful` click action | No chat, link, credential, or remote command enters the notification or its argv; DND/snooze stays under Omarchy's control |
+| Save notification preference | Omarchy's scoped `updateEntryInline` API | Only this widget's non-secret `notifyReplies` setting, on an explicit button click |
 
 The helper runs as `/usr/bin/python3 -I -B` (isolated: no user site-packages,
 `PYTHON*` variables, or script-directory imports) and uses only the standard
@@ -40,11 +42,17 @@ its real domain, and link cards show the domain with the end kept visible
 
 ## What it never does
 
-- Run commands for Muse, approve actions, or write files.
+- Run commands or write files at Muse's request, or approve Muse actions.
 - Use `sudo`, `pkexec`, setuid tools, or change groups or permissions.
 - Open network connections or listeners of its own.
 - Read, accept, store, or display an SDK token or pairing secret.
 - Log or persist chat. The panel keeps at most 20 messages in memory.
+
+The notification preference is saved by the shell, not the helper. Generic
+notification text may remain in the shell's notification history. Unread counts,
+delivery states, and drafts are memory-only and reset with the plugin. A failed
+send can be explicitly restored as a draft; uncertain sends are never retried
+automatically, since a missing acknowledgement does not prove non-delivery.
 
 ## The companion's boundary
 
@@ -87,11 +95,20 @@ unauthenticated ECDH exchange, so they are safe from passive observers but
 not from an active man-in-the-middle in Bluetooth range during the pairing
 window. The phone must finish the encrypted handshake, and the person at the
 computer must press Enter in the pairing terminal before provisioning is
-allowed. The SDK token is never sent over Bluetooth; the companion reports it
-to Muse directly over HTTPS. A nearby attacker can still interfere with or
-race a pairing session, so pair at home or somewhere you control, keep the
-window (10 minutes, only while `sudo musegadget pair` is running) short, and
-re-pair if you ever suspect it was interfered with.
+allowed. Only after that confirmation, the SDK token is included in the
+encrypted `pairing_confirmed` record sent to the phone. This is required by the
+SDK: the phone presents it when minting the device token. Refreshing a device
+token does not register or replace an SDK token.
+
+Local confirmation is consent, not cryptographic authentication of the phone.
+An active nearby man-in-the-middle could obtain the SDK token or device
+credentials. Pair at home or somewhere you control, keep the window (10 minutes,
+only while `sudo musegadget pair` is running) short, and revoke the SDK token and
+pair again if you suspect interference. Replacing or revoking the paired SDK
+token requires `sudo musegadget pair --force`; the pairing stores only its
+12-character hint alongside the root-only device credentials. Neither the full
+token nor its hint is published in the non-secret status file; the UI receives
+only a boolean indicating a changed token.
 Endpoints the pairing supplies are pinned before any token is sent to
 them: API URLs must be https on `api.muse.ai` or another `*.muse.ai` host
 (any Muse subdomain is trusted with the device token), the Noise host
@@ -106,8 +123,9 @@ repository. Never post tokens, pairing files, or real chats in issues.
 
 ## Release checklist
 
-CI runs the plugin tests, the companion tests, and
-`ruff check helpers tests companion/src companion/tests`.
+CI runs the plugin tests, the companion tests,
+`ruff check helpers tests companion/src companion/tests`, and Qt Quick Test
+coverage of the real in-memory chat state machine.
 
 The marketplace's automated baseline should report no findings, and
 `review-required` for capabilities that are accurately present: the companion's
@@ -115,14 +133,26 @@ installer, package installs, `sudo`, and its systemd service.
 
 Before each release, on an Omarchy machine:
 
-- `omarchy plugin validate .` and `qmllint -I "$OMARCHY_PATH/shell" *.qml`.
+- `omarchy plugin validate .` on a clean source tree (no `.venv` symlinks), and
+  Qt 6 `qmllint -I "$OMARCHY_PATH/shell" *.qml` (not a Qt 5 tool on PATH).
 - A secret scan of the working tree and the full git history.
 - Click to open and close the panel; Escape closes it;
   `omarchy-shell shell toggle omuseful` works.
 - Disable, re-enable, `omarchy restart shell`, then `omarchy plugin remove`:
   no leftover helper processes (`pgrep -af muse_bridge`).
 - With the companion stopped, offline, or stock: the icon dims, setup shows
-  the right step, and chat is disabled.
+  the right step, and sending is disabled while drafts remain editable.
+- Fresh pairing with the current Muse phone app succeeds after terminal
+  confirmation; no token appears in discovery, logs, or the public status file.
+- Replace a token: the guide offers Pair again, and a fresh device token is
+  minted with the replacement after explicit terminal confirmation.
+- Failed, unconfirmed, accepted-but-interrupted, and complete turns have distinct
+  labels; Edit & retry never sends automatically or overwrites another draft.
+- Enable notifications: a completed background turn creates one fixed-text
+  alert; partial/stopped/timed-out turns do not. DND/snooze suppress popups, and
+  clicking the alert summons Chat even if Setup was previously selected.
+- Test two monitors: reading the latest Chat on either clears unread state;
+  closing one panel must not mark the other as closed.
 - In the Muse app, the paired device lists no commands.
 
 Licensing and terms (not legal advice; recheck before publishing):

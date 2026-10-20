@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 QML = {path.name: path.read_text() for path in ROOT.glob("*.qml")}
 CODE = "".join(re.sub(r"^\s*//.*$", "", text, flags=re.M) for text in QML.values())
-SOURCES = [path for path in ROOT.rglob("*")
-           if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts
+GENERATED = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
+
+
+def package_paths():
+    for directory, directories, files in os.walk(ROOT):
+        directories[:] = [name for name in directories if name not in GENERATED]
+        yield from (Path(directory) / name for name in directories + files if name not in GENERATED)
+
+
+PACKAGE = list(package_paths())
+SOURCES = [path for path in PACKAGE
+           if path.is_file()
            and path.suffix in {".qml", ".py", ".json", ".md", ".toml", ".yml"}]
 
 
 def test_package_is_only_the_chat_interface():
-    assert set(QML) == {"BarWidget.qml", "OmusefulMark.qml", "Panel.qml", "Service.qml", "SetupGuide.qml"}
+    assert set(QML) == {"BarWidget.qml", "ChatState.qml", "OmusefulMark.qml", "Panel.qml", "Service.qml", "SetupGuide.qml"}
     assert [path.name for path in (ROOT / "helpers").glob("*.py")] == ["muse_bridge.py"]
 
 
@@ -30,7 +41,7 @@ def test_manifest_has_every_marketplace_field():
 
 
 def test_no_symlinks_or_invisible_characters():
-    assert not [path for path in ROOT.rglob("*") if path.is_symlink() and ".git" not in path.parts]
+    assert not [path for path in PACKAGE if path.is_symlink()]
     hidden = re.compile("[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
     assert not [str(path) for path in SOURCES if hidden.search(path.read_text(encoding="utf-8"))]
 
@@ -38,7 +49,7 @@ def test_no_symlinks_or_invisible_characters():
 def test_qml_runs_only_fixed_local_programs():
     service = QML["Service.qml"]
     programs = set(re.findall(r'\["([^"]+)"', CODE))
-    assert programs <= {"/usr/bin/python3", "wl-copy", "omarchy-launch-floating-terminal-with-presentation",
+    assert programs <= {"/usr/bin/python3", "wl-copy", "omarchy", "omarchy-launch-floating-terminal-with-presentation",
                         "watch", "send"}  # the last two are the helper's own actions
     assert '"-I", "-B"' in service
     # The installer terminal only ever runs a command the setup guide offers.
@@ -109,3 +120,16 @@ def test_project_identity_is_omuseful():
     manifest = json.loads((ROOT / "manifest.json").read_text())
     assert manifest["id"] == "omuseful" and manifest["name"] == "Omuseful"
     assert 'moduleName: "omuseful"' in QML["BarWidget.qml"] and 'moduleName: "omuseful"' in QML["Panel.qml"]
+
+
+def test_notifications_are_opt_in_fixed_text_and_use_only_the_chat_open_action():
+    service = QML["Service.qml"]
+    notification = re.search(r'id: notificationProcess.*?command:\s*(\[[^\]]+\])', service, re.S)
+    assert json.loads(notification[1]) == [
+        "omarchy", "notification", "send", "--app-name", "Omuseful", "-u", "normal",
+        "-t", "8000", "Muse replied", "Open Omuseful to read the reply.",
+        "--exec", "omarchy-shell", "shell", "summon", "omuseful",
+    ]
+    assert "property bool notificationsEnabled: false" in service
+    assert "root.notificationsEnabled && !root.shuttingDown" in service
+    assert 'root.setting("notifyReplies", false) === true' in QML["BarWidget.qml"]

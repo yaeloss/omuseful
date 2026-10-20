@@ -114,7 +114,8 @@ class _TerminalConfirmation:
             print("Press Enter again to confirm the request shown above.", flush=True)
 
 
-def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bool]], bool]) -> None:
+def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bool]], bool],
+                     sdk_token_hint: str | None = None) -> None:
     # Only Meta's hosts are stored: the service sends its bearer tokens to
     # these endpoints, so an untrusted one from provisioning is dropped.
     api_url = credentials.api_url if muse_api.trusted_api_url(credentials.api_url) else ""
@@ -136,6 +137,8 @@ def _verify_and_save(credentials: Credentials, commit: Callable[[Callable[[], bo
         "noise_host": muse_api.trusted_noise_host(credentials.noise_host),
         "access_token_saved_at": int(time.time()),
     }
+    if sdk_token_hint:
+        record["sdk_token_hint"] = sdk_token_hint
 
     def save() -> bool:
         config.save_json(config.PAIRING_FILE, record)
@@ -170,6 +173,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
         device_id=ident.device_id,
         mac=ident.mac,
         firmware_version=__version__,
+        sdk_token=sdk_token,
     )
     completed = threading.Event()
     controller: SetupController | None = None
@@ -194,7 +198,9 @@ def cmd_pair(args: argparse.Namespace) -> int:
         version=__version__,
         transport=server,
         network=_SystemNetwork(),
-        provision=_verify_and_save,
+        provision=lambda credentials, commit: _verify_and_save(
+            credentials, commit, sdk_token_hint=sdk_token[:12],
+        ),
         on_complete=finish,
         on_confirmation_required=terminal.prompt,
         on_confirmation_ended=terminal.ended,
@@ -204,6 +210,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
 
     print(f"Setup open for {args.timeout // 60} minutes. In the Muse app, add a device")
     print(f"and choose {ident.ble_name}.")
+    print("After you confirm here, your SDK token is sent to the phone in the encrypted "
+          "pairing confirmation. Pair somewhere private.")
     controller.start()
     terminal.start()
     window.start()

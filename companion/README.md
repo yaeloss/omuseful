@@ -23,7 +23,7 @@ token at <https://gadgets.muse.ai/settings/sdk-tokens> and read the
 
 ```bash
 bash omuseful-token.sh              # replace the SDK token
-sudo musegadget pair                # pair again
+sudo musegadget pair --force        # pair again, required after replacing a token
 bash omuseful-setup.sh --uninstall  # remove the service, token, and pairing
 ```
 
@@ -36,8 +36,13 @@ bash omuseful-setup.sh --uninstall  # remove the service, token, and pairing
 - A non-secret status file, `/run/omuseful/status.json`.
 
 During pairing, the terminal asks you to verify the Muse app and press Enter
-before provisioning is allowed. The SDK token is never sent over Bluetooth;
-the companion reports it to Muse directly over HTTPS.
+before provisioning is allowed. After confirmation, the SDK token is included
+in the encrypted pairing confirmation so the phone can register it with Muse.
+Community pairing is encrypted but cannot authenticate an active nearby
+attacker: pair somewhere private (see [SECURITY.md](../SECURITY.md#pairing)).
+The SDK token is recorded only during pairing, not during device-token refresh;
+pair again after replacing it. A root-only token hint detects later changes
+without exposing the token to the plugin.
 
 The SDK token, device identity, and pairing stay root-only in
 `/var/lib/musegadget`. Logs never contain your messages, Muse's replies,
@@ -59,6 +64,9 @@ BlueZ's battery plugin; `--uninstall` restores both.
   message (and kept to its chat), including link cards.
 - `omuseful.py`: status file and chat-socket access for the `omuseful` group.
 - `cli.py`, `install.sh`, `data/`: chat-only service, local source, sandbox.
+- `pairing.py`: the SDK token is handed to the phone only in the encrypted
+  confirmation after local terminal consent; `service.py` no longer refreshes
+  solely to try to register a token.
 - Removed: `executor.py`, `fileops.py`, and the examples.
 
 ## Tests
