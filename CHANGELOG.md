@@ -2,6 +2,10 @@
 
 ## 0.1.4 (unreleased)
 
+- Bound VM lookup and token refresh HTTP bodies to 1 MiB before JSON parsing,
+  reject compressed responses, and close redirect/error bodies without draining
+  them. Add a 256 MiB systemd service memory cap with swap disabled. Re-run
+  **Setup → Run setup** to update the installed companion and service limits.
 - Limit incoming companion WebSocket messages to 64 KiB before Noise processing,
   disable compression, and apply receive-queue backpressure. Add real WebSocket
   regression tests for oversized, fragmented, and compressed input.

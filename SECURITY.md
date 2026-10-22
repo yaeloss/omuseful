@@ -77,6 +77,20 @@ compressed frames are rejected without inflation. A 4-frame receive-queue
 high-water mark applies backpressure. Larger application responses still use
 multiple bounded Noise chunks and remain subject to their downstream limits.
 
+VM lookup and token refresh HTTP bodies are limited to 1 MiB before JSON
+decoding. Reads use at most 64 KiB at a time and one extra byte to detect
+overflow, including chunked responses and responses without Content-Length.
+Oversized advertised lengths are rejected before reading the body. Requests
+ask for identity encoding; encoded responses are rejected without decompression.
+Redirect and HTTP error bodies are closed without draining them. Malformed or
+oversized responses fail the request without replacing saved credentials.
+
+The base systemd service also sets `MemoryHigh=192M`, `MemoryMax=256M`, and
+`MemorySwapMax=0`, so its memory budget applies with or without the hardening
+drop-in. `OOMPolicy=kill` and the existing restart policy stop and restart the
+service if it hits the hard limit. Updating the plugin alone does not update
+this installed service: use **Setup → Run setup** to install these protections.
+
 Access to the chat socket is limited to the `omuseful` group (plus a
 per-user ACL so members don't have to log out). Any process running as a
 member can send chat as you, including other shell plugins, since all

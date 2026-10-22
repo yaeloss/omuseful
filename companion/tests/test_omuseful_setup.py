@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import re
 import subprocess
@@ -120,6 +121,30 @@ def test_setup_delegates_access_changes_to_installer_after_source_check():
     source = (Path(__file__).parents[1] / "omuseful-setup.sh").read_text()
     assert "groupadd" not in source and "usermod" not in source
     assert "omuseful-hardening.conf" not in source
+
+
+@pytest.mark.parametrize("with_dropin", [False, True])
+def test_installed_service_has_a_memory_budget(tmp_path, with_dropin):
+    companion = Path(__file__).parents[1]
+    data = companion / "src/musegadget/data"
+    source = (companion / "install.sh").read_text()
+    install_service = source[source.index("install_service() {"):source.index("\nwait_for_bluetooth()")]
+    unit = tmp_path / "musegadget.service"
+    # Exercise the installer's real unit-copy step without privileges or a
+    # running service. The base unit must be bounded even without --setup-user.
+    script = ('as_root() { "$@"; }\nsay() { :; }\nsystemd_running() { return 1; }\n'
+              f'DATA_DIR="{data}"\nUNIT="{unit}"\n' + install_service + '\ninstall_service\n')
+    subprocess.run(["bash", "-euc", script], check=True, capture_output=True, timeout=10)
+    settings = configparser.ConfigParser(interpolation=None)
+    settings.read(unit)
+    if with_dropin:
+        settings.read(data / "omuseful-hardening.conf")
+    service = settings["Service"]
+    assert service["MemoryMax"].endswith("M")
+    assert 0 < int(service["MemoryHigh"][:-1]) < int(service["MemoryMax"][:-1]) <= 256
+    assert service["MemorySwapMax"] == "0"
+    assert service["OOMPolicy"] == "kill"
+    assert service["Restart"] == "always"
 
 
 def test_source_is_checked_before_the_sdk_token_prompt():

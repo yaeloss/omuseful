@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import platform
@@ -32,6 +33,10 @@ log = logging.getLogger(__name__)
 API_BASE = "https://api.muse.ai"
 FETCH_PATH = "/fetch_vms"
 REFRESH_PATH = "/device_token/refresh"
+# VM metadata and token pairs are small. Leave room for large VM lists, but
+# bound the bytes held before JSON decoding, independently of socket timeouts.
+MAX_API_RESPONSE_BYTES = 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
 # The pairing supplies these endpoints, but the device sends its bearer
 # tokens to them, so only Meta's hosts are ever trusted with credentials.
 API_HOST = "api.muse.ai"
@@ -104,6 +109,15 @@ class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     host would still receive the bearer token.
     """
 
+    def http_error_302(self, req, fp, code, msg, headers):
+        # urllib normally drains redirect bodies with an unbounded fp.read().
+        # Its HTTPResponse.read() returns b"" after close; each hop already uses
+        # a new connection, so discard the body before delegating URL/loop checks.
+        fp.close()
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         try:
             target = urlsplit(newurl)
@@ -122,8 +136,49 @@ class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _open(request, timeout: float):
+    request.add_header("Accept-Encoding", "identity")
     opener = urllib.request.build_opener(_SameHostRedirectHandler)
     return opener.open(request, timeout=timeout)
+
+
+class _InvalidResponse(ValueError):
+    """An unusable API response; messages must not include response contents."""
+
+
+def _read_json(resp):
+    """Read at most 1 MiB + one overflow byte, then decode bounded JSON.
+
+    Content-Length is only an early rejection hint. Enforce the actual byte
+    budget too, including chunked and EOF-delimited responses. urllib doesn't
+    decompress bodies; explicitly refuse content encodings rather than inflate
+    an attacker-controlled response or pass compressed bytes to the decoder.
+    """
+    if any(value.strip().lower() != "identity"
+           for value in resp.headers.get_all("Content-Encoding", [])):
+        raise _InvalidResponse("unsupported API response content encoding")
+    for value in resp.headers.get_all("Content-Length", []):
+        value = value.strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise _InvalidResponse("invalid API response length")
+        # Avoid converting an arbitrarily long decimal header into a bigint.
+        digits = value.lstrip("0") or "0"
+        if len(digits) > len(str(MAX_API_RESPONSE_BYTES)) or int(digits) > MAX_API_RESPONSE_BYTES:
+            raise _InvalidResponse("API response exceeds 1 MiB limit")
+
+    body = bytearray()
+    while True:
+        chunk = resp.read(min(_READ_CHUNK_BYTES, MAX_API_RESPONSE_BYTES + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > MAX_API_RESPONSE_BYTES:
+            raise _InvalidResponse("API response exceeds 1 MiB limit")
+    try:
+        return json.loads(body)
+    except (ValueError, RecursionError):
+        # Includes malformed encoding, excessive integer digits and nesting.
+        # Never log body excerpts (which could contain credentials).
+        raise _InvalidResponse("invalid API response JSON") from None
 
 
 def user_agent() -> str:
@@ -148,8 +203,8 @@ def fetch_vms_with_status(
     """Leased VMs for the device token, plus the HTTP status if one arrived.
 
     Returns ``(vms, status)``; ``status`` is ``None`` when no HTTP response
-    was obtained. A 401 means the device token was rejected, which a retry
-    won't fix; a ``None`` status is a transport failure worth retrying.
+    was obtained or the response was unusable. A 401 means the device token
+    was rejected, which a retry won't fix; ``None`` is worth retrying.
     """
     req = urllib.request.Request(root + FETCH_PATH, method="GET")
     req.add_header("Authorization", f"Bearer {access_token}")
@@ -158,11 +213,12 @@ def fetch_vms_with_status(
     try:
         with _open(req, timeout=15) as resp:
             status = resp.getcode()
-            data = json.loads(resp.read())
+            data = _read_json(resp)
     except urllib.error.HTTPError as exc:
+        exc.close()  # Error bodies aren't used; never drain them.
         log.error("VM fetch failed: HTTP %d", exc.code)
         return [], exc.code
-    except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+    except (urllib.error.URLError, _InvalidResponse, OSError, http.client.HTTPException) as exc:
         log.error("VM fetch failed: %s", exc)
         return [], None
 
@@ -211,7 +267,7 @@ def _post_refresh(
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", user_agent())
     with _open(req, timeout=15) as resp:
-        data = json.loads(resp.read())
+        data = _read_json(resp)
     if isinstance(data, dict) and isinstance(data.get("payload"), dict):
         data = data["payload"]
     if isinstance(data, dict) and data.get("access_token") and data.get("refresh_token"):
@@ -228,8 +284,8 @@ def refresh_device_token(
 
     Returns ``(tokens, status)``: ``tokens`` is None on failure, and
     ``status`` is the HTTP status that ended the attempt, or None for a
-    transport failure. A 401 means the pairing is gone and the device must be
-    paired again.
+    transport failure or unusable response. A 401 means the pairing is gone
+    and the device must be paired again.
 
     The access token is never presented, as on the ESP32: the server can
     accept it and answer 200 with replacement tokens that every endpoint then
@@ -241,11 +297,12 @@ def refresh_device_token(
     try:
         return _post_refresh(f"Bearer hatch_refresh:{raw_refresh}", device_id, root, sdk_token), 200
     except urllib.error.HTTPError as exc:
+        exc.close()
         if exc.code == 401:
             log.warning("token refresh rejected: device must be paired again")
         else:
             log.warning("token refresh failed: HTTP %d", exc.code)
         return None, exc.code
-    except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+    except (urllib.error.URLError, _InvalidResponse, OSError, http.client.HTTPException) as exc:
         log.warning("token refresh failed: %s", exc)
         return None, None

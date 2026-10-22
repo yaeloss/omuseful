@@ -35,6 +35,12 @@ bash omuseful-setup.sh --uninstall  # remove the service, token, and pairing
 - A local socket, `/run/musegadget/musegadget.sock`, for the `omuseful` group.
 - A non-secret status file, `/run/omuseful/status.json`.
 
+VM lookup and token refresh responses are capped at 1 MiB before JSON parsing;
+HTTP compression is refused, and redirect/error bodies are discarded without
+reading them. The base service has a 256 MiB memory limit, a 192 MiB reclaim
+threshold, and no swap allowance. Re-run **Setup → Run setup** after updating
+the plugin to apply companion fixes and service limits.
+
 During pairing, the terminal asks you to verify the Muse app and press Enter
 before provisioning is allowed. After confirmation, the SDK token is included
 in the encrypted pairing confirmation so the phone can register it with Muse.

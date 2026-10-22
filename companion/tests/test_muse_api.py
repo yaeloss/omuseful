@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+from email.message import Message
 
 import pytest
 
@@ -30,7 +31,9 @@ def sent(monkeypatch):
 
     def urlopen(req, timeout):
         bodies.append((req.get_header("Authorization"), json.loads(req.data)))
-        return io.BytesIO(json.dumps(TOKENS).encode())
+        response = io.BytesIO(json.dumps(TOKENS).encode())
+        response.headers = Message()
+        return response
 
     monkeypatch.setattr(muse_api, "_open", urlopen)
     return bodies

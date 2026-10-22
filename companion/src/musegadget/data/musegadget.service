@@ -28,6 +28,13 @@ RuntimeDirectory=musegadget
 RuntimeDirectoryMode=0755
 StateDirectory=musegadget
 StateDirectoryMode=0700
+# Installed on every setup path, including without the optional access drop-in.
+# Backstop for parser/runtime allocations beyond the per-response byte limits.
+MemoryAccounting=yes
+MemoryHigh=192M
+MemoryMax=256M
+MemorySwapMax=0
+OOMPolicy=kill
 Restart=always
 RestartSec=5
 
