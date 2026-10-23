@@ -453,3 +453,39 @@ def test_setup_runs_only_fixed_bundled_commands():
 def test_pair_is_only_offered_once_a_token_exists():
     token_missing = bridge.setup_guide({"available": True}, True)["steps"][1]
     assert token_missing["run"] == "" and token_missing["disabled_hint"]
+
+
+def test_manifest_version_meets_bridge_floor():
+    root = Path(__file__).parents[1]
+    version = json.loads((root / "manifest.json").read_text())["version"]
+    assert tuple(map(int, version.split("."))) >= bridge.MIN_COMPANION_VERSION
+
+
+VECTORS = Path(__file__).parent / "link_vectors.json"
+
+
+def test_shared_link_vectors():
+    # Same file drives the QML suite (tst_LinkSafety.qml): the two link
+    # checks must agree on every vector.
+    vectors = json.loads(VECTORS.read_text(encoding="utf-8"))
+    assert vectors
+    for vector in vectors:
+        assert bool(bridge.safe_url(vector["url"])) is vector["valid"], vector["url"]
+
+
+def test_link_length_boundaries():
+    # Mirrored in tst_LinkSafety.qml; overlong input is never a link.
+    assert bridge.safe_url("https://example.com/" + "a" * (2048 - 20))
+    assert bridge.safe_url("https://example.com/" + "a" * (2049 - 20)) == ""
+    assert bridge.safe_url("https://" + "a" * 253 + "/")
+    assert bridge.safe_url("https://" + "a" * 254 + "/") == ""
+
+
+def test_reply_anchors_use_the_exact_markup_the_panel_restyles():
+    # Panel.qml's styleLinks tints '<a href="' only; anything else would pass
+    # through unstyled.
+    bare = bridge._anchor("https://example.com/p")
+    assert bare == '<a href="https://example.com/p">https://example.com/p</a>'
+    labelled = bridge._anchor("https://example.com/p", "Example")
+    assert labelled.startswith('<a href="https://example.com/p">')
+    assert labelled.count("<a ") == 1 and "style=" not in labelled

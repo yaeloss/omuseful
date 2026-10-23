@@ -53,30 +53,15 @@ Panel {
 
   function openLink(link) {
     // Only web links from Muse's replies; the label shows the real domain.
-    // Same rules as the helper's safe_url: at most 2048 chars of printable
-    // ASCII, a real host (or a valid bracketed IPv6 literal), a port within
-    // range, no backslash, and no user@ part hiding the host.
-    var url = String(link)
-    if (url.length > 2048 || url.indexOf("\\") >= 0) return
-    for (var i = 0; i < url.length; i++) {
-      var code = url.charCodeAt(i)
-      if (code < 0x21 || code > 0x7E) return
-    }
-    var parts = /^https?:\/\/(\[[^\]]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::([0-9]{1,5}))?(?:[\/?#]\S*)?$/.exec(url)
-    if (!parts) return
-    if (parts[2] !== undefined && parseInt(parts[2], 10) > 65535) return
-    if (parts[1].charAt(0) === '[') {
-      // Bracketed IPv6: "::" at most once, no ":::", 1-4 hex digits a group,
-      // 8 groups without compression, fewer with it.
-      var inner = parts[1].substring(1, parts[1].length - 1)
-      if (!/^[0-9A-Fa-f:]+$/.test(inner) || inner.indexOf(":::") >= 0) return
-      var halves = inner.split("::")
-      if (halves.length > 2) return
-      var groups = inner.split(":").filter(function(group) { return group.length > 0 })
-      for (var g = 0; g < groups.length; g++) if (groups[g].length > 4) return
-      if (halves.length === 1 ? groups.length !== 8 : groups.length >= 8) return
-    }
-    Qt.openUrlExternally(url)
+    // LinkSafety mirrors the helper's safe_url; tests/link_vectors.json pins
+    // both, so the two checks cannot drift apart.
+    if (linkSafety.isSafeLink(link)) Qt.openUrlExternally(String(link))
+  }
+
+  function styleLinks(html) {
+    // Tint the helper's anchors. It emits exactly '<a href="...">' (pinned by
+    // test_bridge.py), so anything else passes through unstyled, never broken.
+    return String(html).split("<a href=").join('<a style="color:' + Theme.Color.accent + '" href=')
   }
 
   function scrollToLatest() {
@@ -106,6 +91,8 @@ Panel {
   onCurrentViewChanged: root.updateReader()
   onServiceChanged: Qt.callLater(root.updateReader)
   Component.onDestruction: if (root.readerService) root.readerService.setReader(root, false)
+
+  LinkSafety { id: linkSafety }
 
   KeyboardPanel {
     id: panel
@@ -365,8 +352,7 @@ Panel {
                     // Muse's replies use the helper's escaped HTML subset (links,
                     // bold, italic, code, bullets); your own messages stay plain.
                     readonly property bool rich: chatRow.fromMuse && chatRow.messageHtml !== ""
-                    text: rich ? chatRow.messageHtml.split("<a href=").join(
-                        '<a style="color:' + Theme.Color.accent + '" href=') : chatRow.messageText
+                    text: rich ? root.styleLinks(chatRow.messageHtml) : chatRow.messageText
                     textFormat: rich ? TextEdit.RichText : TextEdit.PlainText
                     onLinkActivated: function(link) { root.openLink(link) }
                     HoverHandler {

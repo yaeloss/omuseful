@@ -29,6 +29,9 @@ from urllib.parse import urlsplit
 SCHEMA = 1
 MAX_JSON = 128 * 1024
 MAX_MESSAGE = 60 * 1024
+# Oldest companion this panel talks to. Bump together with the release
+# version; test_companion_contract.py keeps the stamps in agreement.
+MIN_COMPANION_VERSION = (0, 1, 4)
 STATUS = Path("/run/omuseful/status.json")
 SOCKET = Path("/run/musegadget/musegadget.sock")
 STATUS_FIELDS = ("paired", "connected", "pairing", "ble_name", "sdk_token_configured",
@@ -116,6 +119,10 @@ def safe_url(url) -> str:
         return ""
     host = parts.hostname
     if ":" in host:  # urlsplit strips the brackets of an IPv6 literal
+        if "%" in host or "." in host:
+            # No zone ids or embedded IPv4: chat links have no use for them,
+            # and the panel's second check rejects them too.
+            return ""
         try:
             ipaddress.IPv6Address(host)
         except ValueError:
@@ -280,7 +287,7 @@ def setup_guide(status: dict, access: bool) -> dict:
     terminal with a fixed command ("run"), or copy it ("command").
     """
     version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", status.get("version", ""))
-    if version and tuple(map(int, version.groups())) < (0, 1, 4):
+    if version and tuple(map(int, version.groups())) < MIN_COMPANION_VERSION:
         status = {"available": False, "state": "incompatible"}
     if status.get("available") is not True:
         state = status.get("state")

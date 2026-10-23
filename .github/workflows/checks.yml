@@ -40,3 +40,4 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           QT_QUICK_BACKEND: software
+          QML_XHR_ALLOW_FILE_READ: 1 # tst_LinkSafety.qml loads the shared vectors

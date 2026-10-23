@@ -26,7 +26,8 @@ SOURCES = [path for path in PACKAGE
 
 
 def test_package_is_only_the_chat_interface():
-    assert set(QML) == {"BarWidget.qml", "ChatState.qml", "OmusefulMark.qml", "Panel.qml", "Service.qml", "SetupGuide.qml"}
+    assert set(QML) == {"BarWidget.qml", "ChatState.qml", "LinkSafety.qml", "OmusefulMark.qml", "Panel.qml",
+                        "Service.qml", "SetupGuide.qml"}
     assert [path.name for path in (ROOT / "helpers").glob("*.py")] == ["muse_bridge.py"]
 
 
@@ -64,19 +65,23 @@ def test_nothing_in_the_ui_approves_or_runs_commands():
 
 
 def test_text_is_plain_and_links_are_fixed():
-    panel, guide = QML["Panel.qml"], QML["SetupGuide.qml"]
+    panel, guide, safety = QML["Panel.qml"], QML["SetupGuide.qml"], QML["LinkSafety.qml"]
     # Rich text only for Muse's replies, and only the helper's escaped HTML.
     assert "textFormat: rich ? TextEdit.RichText : TextEdit.PlainText" in panel
     assert 'readonly property bool rich: chatRow.fromMuse && chatRow.messageHtml !== ""' in panel
     assert CODE.count("RichText") == 1 and "StyledText" not in CODE
     assert "onLinkActivated: function(link) { root.openLink(link) }" in panel
-    # The QML opener applies the helper's safe_url rules a second time:
-    # printable ASCII, a real host, no backslash, no user@ part.
-    assert 'url.indexOf("\\\\")' in panel and "charCodeAt" in panel
-    assert "[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?" in panel
-    # Same bounds as safe_url: length cap, port range, valid IPv6 literals.
-    assert "url.length > 2048" in panel and "parseInt(parts[2], 10) > 65535" in panel
-    assert 'inner.indexOf(":::")' in panel and "groups.length !== 8" in panel
+    assert "if (linkSafety.isSafeLink(link)) Qt.openUrlExternally(String(link))" in panel
+    assert "root.styleLinks(chatRow.messageHtml)" in panel
+    # LinkSafety applies the helper's safe_url rules a second time: printable
+    # ASCII, a real host, no backslash, no user@ part. Behavior is pinned by
+    # tests/link_vectors.json, shared with the Python suite.
+    assert 'url.indexOf("\\\\")' in safety and "charCodeAt" in safety
+    assert "[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?" in safety
+    # Same bounds as safe_url: length cap, host cap, port range, valid IPv6.
+    assert "url.length > 2048" in safety and "parseInt(parts[2], 10) > 65535" in safety
+    assert 'inner.indexOf(":::")' in safety and "groups.length !== 8" in safety
+    assert "parts[1].length > 253" in safety
     assert "TextField" not in guide and "password" not in guide.lower()
     assert guide.count("Qt.openUrlExternally(") == guide.count('startsWith("https://gadgets.muse.ai/")')
 
