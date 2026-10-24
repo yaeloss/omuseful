@@ -26,6 +26,7 @@ import logging
 import signal
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 import dbus
@@ -71,6 +72,37 @@ def _find_adapter(bus: dbus.SystemBus) -> str:
         if ADAPTER_IFACE in ifaces:
             return path
     raise RuntimeError("no Bluetooth adapter found")
+
+
+def _unblock_bluetooth() -> None:
+    """Clear rfkill soft blocks; BlueZ refuses to power a blocked adapter."""
+    for dev in Path("/sys/class/rfkill").glob("rfkill*"):
+        try:
+            if (dev / "type").read_text().strip() != "bluetooth":
+                continue
+            if (dev / "soft").read_text().strip() == "1":
+                log.info("clearing rfkill soft block on %s", dev.name)
+                (dev / "soft").write_text("0")
+        except OSError as err:
+            log.warning("could not unblock %s: %s", dev.name, err)
+
+
+def _power_on(adapter: dbus.Interface) -> None:
+    if bool(adapter.Get(ADAPTER_IFACE, "Powered")):
+        return
+    _unblock_bluetooth()
+    # The adapter takes a moment to come back after an rfkill unblock.
+    for _ in range(10):
+        try:
+            adapter.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
+            return
+        except dbus.exceptions.DBusException as err:
+            last = err
+            time.sleep(0.5)
+    raise RuntimeError(
+        f"could not turn Bluetooth on ({last.get_dbus_name()}). "
+        "Check `rfkill list` and `bluetoothctl show`, then try again."
+    )
 
 
 class Advertisement(dbus.service.Object):
@@ -243,7 +275,7 @@ class BleServer:
         self._adapter_path = _find_adapter(bus)
         adapter = dbus.Interface(bus.get_object(BLUEZ_SERVICE, self._adapter_path), DBUS_PROP_IFACE)
         self._saved_adapter = {k: adapter.Get(ADAPTER_IFACE, k) for k in ("Alias", "Pairable")}
-        adapter.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
+        _power_on(adapter)
         # The phone reads the GAP name as well as the advertised one.
         adapter.Set(ADAPTER_IFACE, "Alias", dbus.String(self._local_name))
         adapter.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(False))

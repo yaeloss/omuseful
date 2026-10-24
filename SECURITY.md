@@ -156,7 +156,9 @@ installer, package installs, `sudo`, and its systemd service.
 Before each release, on an Omarchy machine:
 
 - `omarchy plugin validate .` on a clean source tree (no `.venv` symlinks), and
-  Qt 6 `qmllint -I "$OMARCHY_PATH/shell" *.qml` (not a Qt 5 tool on PATH).
+  Qt 6 `qmllint` (not a Qt 5 tool on PATH) with the shell modules resolvable:
+  `mkdir -p /tmp/qs-imports && ln -sfn "$OMARCHY_PATH/shell" /tmp/qs-imports/qs`,
+  then `qmllint -I /tmp/qs-imports *.qml`. Expect warnings only, no errors.
 - A secret scan of the working tree and the full git history.
 - Click to open and close the panel; Escape closes it;
   `omarchy-shell shell toggle omuseful` works.

@@ -21,6 +21,16 @@
   clicks summon Chat rather than toggling an already-open panel closed.
 - Add offline pairing-contract regression tests and real Qt 6 chat-state tests,
   including partial streams and multi-monitor read tracking.
+- Pin the release version across the manifest, companion package, and bridge
+  compat floor with a contract test, and lock the bridge message size below
+  the companion's local request limit.
+- Share link-safety vectors between the Python and QML suites so the helper's
+  `safe_url` and the panel's opener cannot drift; agree on case-insensitive
+  schemes, empty and zero-padded ports, and the 253-character host cap, and
+  reject IPv6 zone ids and embedded IPv4 on both sides.
+- Restyle reply links through a named panel helper and pin the exact anchor
+  markup it depends on. Fix the release-checklist `qmllint` invocation to
+  resolve the shell's QML modules.
 
 ### Updating the companion
 

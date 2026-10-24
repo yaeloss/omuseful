@@ -230,6 +230,9 @@ def cmd_pair(args: argparse.Namespace) -> int:
         server.run()
     except KeyboardInterrupt:
         pass
+    except RuntimeError as exc:
+        print(f"Bluetooth setup failed: {exc}", file=sys.stderr)
+        return 1
     finally:
         terminal.stop()
         window.cancel()

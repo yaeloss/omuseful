@@ -361,6 +361,12 @@ wait_for_bluetooth() {
     # Setup may have just restarted bluetoothd; advertising too early fails
     # with "Invalid Parameters" and the phone never sees this computer.
     local tries
+    if command -v rfkill >/dev/null 2>&1; then
+        as_root rfkill unblock bluetooth >/dev/null 2>&1 || true
+    fi
+    if ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+        bluetoothctl power on >/dev/null 2>&1 || true
+    fi
     for tries in $(seq 20); do
         if bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
             sleep 3
