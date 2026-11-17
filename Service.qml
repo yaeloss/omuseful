@@ -11,6 +11,11 @@ Item {
   property string message: ""
   property alias chatMessages: chatState.messages
   readonly property int chatCount: chatState.count
+  readonly property alias threads: chatState.threads
+  readonly property int threadCount: chatState.threadCount
+  readonly property string activeThreadId: chatState.activeThreadId
+  readonly property string activeThreadTitle: chatState.activeThreadTitle
+  readonly property string activeThreadDraft: chatState.activeThreadDraft
   readonly property string chatMessage: chatState.message
   readonly property string chatPhase: chatState.phase
   property string chatPayload: ""
@@ -40,6 +45,16 @@ Item {
   function setReader(reader, active) { chatState.setReader(reader, active) }
   function deliveryLabel(state) { return chatState.deliveryLabel(state) }
   function messageForRetry(id) { return chatState.retryText(id) }
+
+  // Threads are client-side sessions sharing one single-turn socket. Switching
+  // is refused while a turn is pending; the panel explains instead of losing
+  // the in-flight reply. Drafts are memory-only, per thread.
+  function newThread() { return chatState.newThread() }
+  function switchThread(id) { return chatState.switchThread(id) }
+  function deleteThread(id) { return chatState.deleteThread(id) }
+  function renameThread(id, title) { return chatState.renameThread(id, title) }
+  function threadTitle(id) { return chatState.threadTitle(id) }
+  function setThreadDraft(text) { chatState.setActiveDraft(text) }
 
   function copyCommand(text) { root.copyText(text, "command") }
   function copyMessage(text) { root.copyText(text, "message") }

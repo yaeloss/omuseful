@@ -78,10 +78,20 @@ Click the chat-bubble icon in the bar. It dims while disconnected, shows an
 ellipsis while working, and a badge when a reply arrives that you aren't reading.
 
 - **Chat:** type and press Enter (Shift+Enter for a new line). Replies stream
-  in with basic formatting and clickable links, and also appear in the Muse
-  app. **Copy** puts a message (or a card's link) on the clipboard. While Muse is replying, the send button
+  in with formatting — bold, italic, code, fenced code blocks, lists, tables,
+  links, and more — and also appear in the Muse app. **Copy** puts a message (or a card's link) on the clipboard. While Muse is replying, the send button
   becomes **Stop waiting**. This ends the local wait, not necessarily Muse's
   work; its answer may still appear in the Muse app.
+- **Chats:** use **Chats** (or Ctrl+K) to keep up to 20 separate threads in
+  this panel, each with its own messages, draft, and unread badge. New
+  threads auto-title from your first message and can be renamed or deleted.
+  Muse still sees one conversation in its app; threads only organize this
+  panel. While Muse is replying, switching or starting a chat is paused.
+- **Composer:** Ctrl+Up/Ctrl+Down recalls your last messages (plain Up/Down
+  also recalls while the draft is a single line), the counter shows your
+  draft against the message limit, Ctrl+E opens emoji, and slash commands
+  work anywhere: `/new` new chat, `/stop` stop waiting, `/copy` copy Muse's
+  last reply, `/help` show key help.
 - **Delivery:** each outgoing message shows Sending, Accepted, Replying, or
   Complete. Confirmed failures offer **Edit & retry**, which restores an editable
   draft without sending it. An uncertain delivery says to check Muse before
@@ -112,7 +122,8 @@ omarchy-shell shell toggle omuseful
 ## Configure
 
 The **Reply notifications** button in Setup saves the `notifyReplies` preference
-in this widget's Omarchy bar entry. It is the only setting; no chats are saved.
+in this widget's Omarchy bar entry. It is the only setting; no chats are saved
+— threads, drafts, and message recall stay in memory and clear on reload.
 To move the icon:
 
 ```bash
@@ -139,8 +150,9 @@ device in the Muse app (Settings > Devices).
 - Messages go from the panel through the local companion to your Muse account
   over Meta's existing encrypted connection, under
   [Muse's privacy policy](https://muse.ai/privacy).
-- The panel keeps at most 20 messages in memory. They are never written to
-  disk and are cleared when the shell or plugin reloads.
+- The panel keeps at most 20 messages per thread in up to 20 threads, plus
+  per-thread drafts and a 50-entry recall list, all in memory. They are never
+  written to disk and are cleared when the shell or plugin reloads.
 - The plugin never sees your SDK token; the guide shows only whether one is
   configured or needs pairing again. No analytics, telemetry, or hosted relay.
 - Reply notifications contain only fixed text. If enabled, they can appear in

@@ -183,4 +183,63 @@ TestCase {
     compare(state.count, 20)
     compare(state.messages.get(19).messageText, "answer 24")
   }
+
+  function test_threads_isolate_messages_and_preserve_drafts() {
+    state.begin("first question")
+    complete("first answer")
+    compare(state.threadCount, 1)
+    state.setActiveDraft("kept draft")
+    verify(state.newThread())
+    compare(state.threadCount, 2)
+    compare(state.count, 0)
+    verify(state.begin("second question"))
+    complete("second answer")
+    compare(state.count, 2)
+    state.setActiveDraft("second draft")
+    verify(state.switchThread(state.threads.get(0).threadId))
+    compare(state.count, 2)
+    compare(state.messages.get(0).messageText, "first question")
+    compare(state.activeThreadDraft, "kept draft")
+    verify(state.switchThread(state.threads.get(1).threadId))
+    compare(state.activeThreadDraft, "second draft")
+    compare(state.messages.get(0).messageText, "second question")
+  }
+
+  function test_thread_auto_title_and_rename_delete() {
+    state.begin("  plan   my   week  ")
+    complete("sure")
+    compare(state.threadTitle(state.activeThreadId), "plan my week")
+    verify(state.renameThread(state.activeThreadId, "Weekly plan"))
+    compare(state.threadTitle(state.activeThreadId), "Weekly plan")
+    var other = state.activeThreadId
+    verify(state.newThread())
+    compare(state.threadCount, 2)
+    verify(state.deleteThread(other))
+    compare(state.threadCount, 1)
+    verify(!state.renameThread("missing", "x"))
+    verify(!state.switchThread("missing"))
+  }
+
+  function test_switching_is_refused_while_a_turn_is_pending() {
+    state.begin("first")
+    complete("one")
+    verify(state.newThread())
+    verify(state.begin("pending question"))
+    verify(!state.switchThread(state.threads.get(0).threadId))
+    verify(!state.newThread())
+    verify(!state.deleteThread(state.threads.get(0).threadId))
+    compare(state.count, 1)
+    state.interrupt("Stopped waiting")
+    verify(state.switchThread(state.threads.get(0).threadId))
+    compare(state.messages.get(0).messageText, "first")
+  }
+
+  function test_new_thread_reuses_a_pristine_active_thread() {
+    verify(state.newThread())
+    compare(state.threadCount, 1)
+    state.begin("hello")
+    complete("hi")
+    verify(state.newThread())
+    compare(state.threadCount, 2)
+  }
 }

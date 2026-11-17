@@ -13,17 +13,148 @@ Panel {
   property var readerService: null
   property string currentView: "chat"
   property string draftNotice: ""
+  property var sentHistory: []
+  property int historyIndex: -1
+  property string historyStash: ""
+  property string renamingThreadId: ""
+  property bool emojiPickerOpen: false
+  readonly property int maxMessageChars: 60000
+  readonly property var emojis: Array.from("😀😄😁😂😊🙂🙃😉😎🤔😐😕😮😲😴👍👎👏🙏💪🔥⭐♥🎉👀💡📎✅❌⏰📌")
   readonly property color foreground: Theme.Color.popups.text
   readonly property bool connected: service && service.connected
   readonly property bool sending: service && service.chatBusy
   readonly property var chatMessages: service ? service.chatMessages : []
   readonly property int chatCount: service ? service.chatCount : 0
 
+  function pushHistory(text) {
+    var clean = String(text)
+    if (!clean.trim()) return
+    if (root.sentHistory.length && root.sentHistory[root.sentHistory.length - 1] === clean) {
+      root.historyIndex = -1
+      return
+    }
+    root.sentHistory = root.sentHistory.concat(clean).slice(-50)
+    root.historyIndex = -1
+    root.historyStash = ""
+  }
+
+  function recallHistory(delta) {
+    if (!root.sentHistory.length) return false
+    if (root.historyIndex < 0) {
+      if (delta > 0) return true  // Already on the live draft.
+      root.historyStash = messageField.text
+    }
+    var next = root.historyIndex < 0
+      ? root.sentHistory.length - 1
+      : Math.min(root.sentHistory.length - 1, Math.max(-1, root.historyIndex + delta))
+    if (next === root.historyIndex) return true
+    root.historyIndex = next
+    if (next < 0) {
+      messageField.text = root.historyStash
+    } else {
+      messageField.text = root.sentHistory[next]
+    }
+    messageField.cursorPosition = messageField.text.length
+    return true
+  }
+
+  function insertEmoji(emoji) {
+    var position = messageField.cursorPosition
+    messageField.insert(position, emoji)
+    messageField.cursorPosition = position + emoji.length
+    messageField.forceActiveFocus()
+  }
+
+  function saveDraft() {
+    if (root.service) root.service.setThreadDraft(messageField.text)
+  }
+
+  function switchToThread(id) {
+    if (!root.service) return
+    root.saveDraft()
+    if (root.service.switchThread(id)) {
+      root.draftNotice = ""
+      messageField.text = root.service.activeThreadDraft || ""
+      root.historyIndex = -1
+      Qt.callLater(scrollToLatest)
+    } else {
+      root.draftNotice = "Stop waiting or let Muse finish before switching chats."
+      root.chooseView("chat")
+    }
+  }
+
+  function startNewThread() {
+    if (!root.service) return
+    root.saveDraft()
+    if (root.service.newThread()) {
+      root.draftNotice = ""
+      messageField.text = root.service.activeThreadDraft || ""
+      root.historyIndex = -1
+      root.chooseView("chat")
+      Qt.callLater(scrollToLatest)
+      messageField.forceActiveFocus()
+    } else {
+      root.draftNotice = "Stop waiting or let Muse finish before starting a new chat."
+      root.chooseView("chat")
+    }
+  }
+
+  function handleSlashCommand(text) {
+    // Returns true if handled. Unknown /commands send normally, so ordinary
+    // slash-leading prompts are never hijacked.
+    var clean = String(text).trim()
+    if (clean.charAt(0) !== "/") return false
+    var command = clean.split(/\s+/)[0].toLowerCase()
+    if (command === "/new" && clean.length <= 5 && clean.indexOf("\n") < 0) {
+      messageField.text = ""
+      root.startNewThread()
+      return true
+    }
+    if (command === "/stop" && clean.length <= 5 && clean.indexOf("\n") < 0) {
+      if (root.service) root.service.stopChat()
+      messageField.text = ""
+      return true
+    }
+    if (command === "/copy" && clean.length <= 5 && clean.indexOf("\n") < 0) {
+      messageField.text = ""
+      var lastAssistant = ""
+      for (var i = root.chatCount - 1; i >= 0; i--) {
+        var row = root.chatMessages.get(i)
+        if (row.role === "assistant" && row.messageText) { lastAssistant = row.messageText; break }
+      }
+      if (lastAssistant && root.service) root.service.copyMessage(lastAssistant)
+      else root.draftNotice = "There is no Muse reply in this chat to copy yet."
+      return true
+    }
+    if (command === "/help" && clean.length <= 5 && clean.indexOf("\n") < 0) {
+      messageField.text = "/new  Start a new chat\n/stop  Stop waiting for Muse\n/copy  Copy Muse's last reply\nHelp: Enter sends, Shift+Enter adds a line, Ctrl+Up/Ctrl+Down recalls messages, Ctrl+K opens chats, Ctrl+E emoji."
+      root.draftNotice = ""
+      messageField.forceActiveFocus()
+      return true
+    }
+    return false
+  }
+
   function submitMessage() {
-    if (!root.connected || !root.service || root.service.chatBusy) return
-    if (root.service.send(messageField.text)) {
+    if (!root.service) return
+    // Slash commands are local operations (/new, /stop, /copy, /help) and
+    // work while busy or offline; only actual sends need a connection.
+    if (String(messageField.text).trim().charAt(0) === "/"
+        && root.handleSlashCommand(messageField.text)) return
+    if (!root.connected || root.service.chatBusy) return
+    if (messageField.text.length > root.maxMessageChars) {
+      root.draftNotice = "That message is too long. Shorten it and try again."
+      return
+    }
+    if (String(messageField.text).trim() === "") return
+    if (root.handleSlashCommand(messageField.text)) return
+    var sent = messageField.text
+    if (root.service.send(sent)) {
+      root.pushHistory(sent)
+      root.saveDraft()
       root.draftNotice = ""
       messageField.text = ""
+      root.emojiPickerOpen = false
       Qt.callLater(scrollToLatest)
     }
   }
@@ -130,12 +261,14 @@ Panel {
             }
           }
           Column {
-            width: parent.width - Theme.Style.space(44) - closeButton.implicitWidth - parent.spacing * 2
+            width: parent.width - Theme.Style.space(44) - newChatButton.implicitWidth - closeButton.implicitWidth - parent.spacing * 3
             anchors.verticalCenter: parent.verticalCenter
             spacing: Theme.Style.space(3)
             Text {
-              text: "Muse"
+              width: parent.width
+              text: root.service && root.service.activeThreadTitle ? root.service.activeThreadTitle : "Muse"
               textFormat: Text.PlainText
+              elide: Text.ElideRight
               color: root.foreground
               font.family: Theme.Style.font.family
               font.pixelSize: Theme.Style.font.subtitle
@@ -162,6 +295,17 @@ Panel {
                 font.pixelSize: Theme.Style.font.caption
               }
             }
+          }
+          Button {
+            id: newChatButton
+            anchors.verticalCenter: parent.verticalCenter
+            text: "＋"
+            fontSize: Theme.Style.font.subtitle
+            radius: height / 2
+            foreground: root.foreground
+            focusable: true
+            tooltipText: "New chat · /new"
+            onClicked: root.startNewThread()
           }
           Button {
             id: closeButton
@@ -194,11 +338,12 @@ Panel {
           Repeater {
             model: [
               { view: "chat", icon: 0xF0365, label: "Chat" },
+              { view: "threads", icon: 0xF043D, label: "Chats" },
               { view: "setup", icon: 0xF08BB, label: "Setup" }
             ]
             delegate: Button {
               required property var modelData
-              width: navRow.width / 2
+              width: navRow.width / 3
               height: navRow.height
               text: String.fromCodePoint(modelData.icon)
               fontSize: Theme.Style.font.subtitle
@@ -350,7 +495,8 @@ Panel {
                     x: Theme.Style.space(14)
                     y: Theme.Style.space(11)
                     // Muse's replies use the helper's escaped HTML subset (links,
-                    // bold, italic, code, bullets); your own messages stay plain.
+                    // bold, italic, code, code blocks, lists, tables); your own
+                    // messages stay plain.
                     readonly property bool rich: chatRow.fromMuse && chatRow.messageHtml !== ""
                     text: rich ? root.styleLinks(chatRow.messageHtml) : chatRow.messageText
                     textFormat: rich ? TextEdit.RichText : TextEdit.PlainText
@@ -514,11 +660,89 @@ Panel {
         }
 
         Item {
+          id: composerTools
+          width: parent.width
+          anchors.bottom: composer.top
+          anchors.bottomMargin: Theme.Style.space(4)
+          height: Theme.Style.space(28)
+          Row {
+            anchors.fill: parent
+            spacing: Theme.Style.space(8)
+            Button {
+              id: emojiButton
+              anchors.verticalCenter: parent.verticalCenter
+              text: "☺"
+              fontSize: Theme.Style.font.body
+              verticalPadding: Theme.Style.space(2)
+              foreground: root.foreground
+              focusable: true
+              tooltipText: "Emoji · Ctrl+E"
+              selected: root.emojiPickerOpen
+              onClicked: root.emojiPickerOpen = !root.emojiPickerOpen
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - emojiButton.implicitWidth - toolsHint.implicitWidth - parent.spacing * 2
+              text: messageField.text.length > 0
+                ? String(messageField.text.length) + " / " + String(root.maxMessageChars)
+                : "Enter sends · Shift+Enter new line"
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: messageField.text.length > root.maxMessageChars ? Theme.Color.urgent : root.foreground
+              opacity: 0.55
+              font.family: Theme.Style.font.family
+              font.pixelSize: Theme.Style.font.caption
+            }
+            Text {
+              id: toolsHint
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Ctrl+K chats · /help"
+              textFormat: Text.PlainText
+              color: root.foreground
+              opacity: 0.55
+              font.family: Theme.Style.font.family
+              font.pixelSize: Theme.Style.font.caption
+            }
+          }
+        }
+
+        Rectangle {
+          id: emojiPicker
+          visible: root.emojiPickerOpen
+          width: parent.width
+          anchors.bottom: composerTools.top
+          anchors.bottomMargin: Theme.Style.space(4)
+          height: visible ? Theme.Style.space(96) : 0
+          radius: Theme.Style.space(12)
+          color: Theme.Util.alpha(root.foreground, 0.055)
+          Grid {
+            anchors.fill: parent
+            anchors.margins: Theme.Style.space(6)
+            columns: 8
+            columnSpacing: Theme.Style.space(2)
+            rowSpacing: Theme.Style.space(2)
+            Repeater {
+              model: root.emojis
+              delegate: Button {
+                required property var modelData
+                width: (emojiPicker.width - Theme.Style.space(12) - 7 * Theme.Style.space(2)) / 8
+                height: Theme.Style.space(30)
+                text: modelData
+                fontSize: Theme.Style.font.subtitle
+                foreground: root.foreground
+                focusable: true
+                onClicked: root.insertEmoji(modelData)
+              }
+            }
+          }
+        }
+
+        Item {
           id: feedback
           readonly property string message: root.draftNotice || (root.service ? (root.service.error || root.service.chatMessage || root.service.message) : "")
           width: parent.width
-          anchors.bottom: composer.top
-          anchors.bottomMargin: visible ? Theme.Style.space(8) : 0
+          anchors.bottom: emojiPicker.visible ? emojiPicker.top : composerTools.top
+          anchors.bottomMargin: visible ? Theme.Style.space(4) : 0
           height: visible ? feedbackText.implicitHeight : 0
           visible: message !== ""
           Text {
@@ -569,10 +793,34 @@ Panel {
               font.family: Theme.Style.font.family
               font.pixelSize: Theme.Style.font.body
               background: Item { }
+              onTextChanged: root.saveDraft()
               // Enter sends, Shift+Enter adds a line; Ctrl+V pastes.
+              // Ctrl+Up/Ctrl+Down recall sent messages; plain Up/Down recalls
+              // too while the draft is single-line, keeping multiline cursor
+              // travel intact. Ctrl+K opens chats, Ctrl+E toggles emoji.
               Keys.onPressed: function(event) {
+                var ctrl = event.modifiers & Qt.ControlModifier
                 if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
                   root.submitMessage()
+                  event.accepted = true
+                } else if (ctrl && event.key === Qt.Key_K) {
+                  root.emojiPickerOpen = false
+                  root.chooseView("threads")
+                  event.accepted = true
+                } else if (ctrl && event.key === Qt.Key_E) {
+                  root.emojiPickerOpen = !root.emojiPickerOpen
+                  event.accepted = true
+                } else if (ctrl && event.key === Qt.Key_Up) {
+                  root.recallHistory(-1)
+                  event.accepted = true
+                } else if (ctrl && event.key === Qt.Key_Down) {
+                  root.recallHistory(1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Up && messageField.text.indexOf("\n") < 0 && root.sentHistory.length) {
+                  root.recallHistory(-1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Down && messageField.text.indexOf("\n") < 0 && root.sentHistory.length && root.historyIndex >= 0) {
+                  root.recallHistory(1)
                   event.accepted = true
                 }
               }
@@ -630,6 +878,157 @@ Panel {
           id: detailContent
           width: details.width
           spacing: Theme.Style.space(14)
+
+          Column {
+            id: threadsColumn
+            visible: root.currentView === "threads"
+            width: parent.width
+            spacing: Theme.Style.space(10)
+            Text {
+              width: parent.width
+              text: "Chats stay on this computer in memory. Muse is one conversation in its app; threads here only organize this panel. Switch is paused while Muse is replying."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: root.foreground
+              opacity: 0.65
+              font.family: Theme.Style.font.family
+              font.pixelSize: Theme.Style.font.caption
+            }
+            Button {
+              text: "＋ New chat"
+              foreground: root.foreground
+              background: Theme.Util.alpha(Theme.Color.accent, 0.25)
+              bordered: true
+              focusable: true
+              onClicked: root.startNewThread()
+            }
+            Repeater {
+              model: root.service ? root.service.threads : []
+              delegate: Column {
+                id: threadBlock
+                required property var modelData
+                required property string threadId
+                required property string title
+                required property int unread
+                width: threadsColumn.width
+                spacing: Theme.Style.space(6)
+                Rectangle {
+                  id: threadRow
+                  width: parent.width
+                  height: Theme.Style.space(52)
+                  radius: Theme.Style.space(12)
+                  color: root.service && threadBlock.threadId === root.service.activeThreadId
+                    ? Theme.Util.alpha(Theme.Color.accent, 0.14)
+                    : Theme.Util.alpha(root.foreground, 0.055)
+                  Row {
+                    anchors.fill: parent
+                    anchors.margins: Theme.Style.space(8)
+                    spacing: Theme.Style.space(8)
+                    Button {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width - threadUnread.width - threadRename.width - threadDelete.width - parent.spacing * 3
+                      text: threadBlock.title
+                      foreground: root.foreground
+                      focusable: true
+                      radius: height / 2
+                      selected: root.service && threadBlock.threadId === root.service.activeThreadId
+                      onClicked: root.switchToThread(threadBlock.threadId)
+                    }
+                    Rectangle {
+                      id: threadUnread
+                      visible: threadBlock.unread > 0
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: visible ? Math.max(Theme.Style.space(20), threadUnreadText.implicitWidth + Theme.Style.space(10)) : 0
+                      height: Theme.Style.space(20)
+                      radius: height / 2
+                      color: Theme.Color.accent
+                      Text {
+                        id: threadUnreadText
+                        anchors.centerIn: parent
+                        text: threadBlock.unread > 9 ? "9+" : String(threadBlock.unread)
+                        textFormat: Text.PlainText
+                        color: Theme.Color.background
+                        font.family: Theme.Style.font.family
+                        font.pixelSize: Theme.Style.font.caption
+                        font.bold: true
+                      }
+                    }
+                    Button {
+                      id: threadRename
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "✎"
+                      fontSize: Theme.Style.font.bodySmall
+                      foreground: root.foreground
+                      focusable: true
+                      tooltipText: "Rename chat"
+                      onClicked: root.renamingThreadId = root.renamingThreadId === threadBlock.threadId ? "" : threadBlock.threadId
+                    }
+                    Button {
+                      id: threadDelete
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "×"
+                      fontSize: Theme.Style.font.body
+                      foreground: root.foreground
+                      focusable: true
+                      tooltipText: "Delete chat"
+                      enabled: root.service && root.service.threadCount > 1 && !root.service.chatBusy
+                      opacity: enabled ? 0.8 : 0.4
+                      onClicked: {
+                        root.saveDraft()
+                        if (root.renamingThreadId === threadBlock.threadId) root.renamingThreadId = ""
+                        if (!root.service.deleteThread(threadBlock.threadId)) {
+                          root.draftNotice = "Stop waiting or let Muse finish before deleting chats."
+                        }
+                      }
+                    }
+                  }
+                }
+                Row {
+                  visible: root.renamingThreadId === threadBlock.threadId
+                  width: parent.width
+                  height: visible ? Theme.Style.space(40) : 0
+                  spacing: Theme.Style.space(6)
+                  Controls.TextField {
+                    id: renameField
+                    width: parent.width - renameSave.implicitWidth - parent.spacing
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: threadBlock.title
+                    color: root.foreground
+                    font.family: Theme.Style.font.family
+                    font.pixelSize: Theme.Style.font.body
+                    background: Item { }
+                    onAccepted: renameSave.onClicked()
+                  }
+                  Button {
+                    id: renameSave
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Save"
+                    fontSize: Theme.Style.font.caption
+                    foreground: root.foreground
+                    focusable: true
+                    onClicked: {
+                      if (root.service && root.service.renameThread(threadBlock.threadId, renameField.text))
+                        root.renamingThreadId = ""
+                      else if (renameField.text.trim() !== "")
+                        root.draftNotice = "Name can't be empty."
+                    }
+                  }
+                }
+              }
+            }
+            Text {
+              width: parent.width
+              text: root.service && root.service.threadCount > 0
+                ? String(root.service.threadCount) + (root.service.threadCount === 1 ? " chat" : " chats") + " · each keeps its last 20 messages."
+                : "No chats yet."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: root.foreground
+              opacity: 0.5
+              font.family: Theme.Style.font.family
+              font.pixelSize: Theme.Style.font.caption
+            }
+          }
 
           Column {
             visible: root.currentView === "setup"

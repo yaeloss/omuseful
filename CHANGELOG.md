@@ -31,6 +31,18 @@
 - Restyle reply links through a named panel helper and pin the exact anchor
   markup it depends on. Fix the release-checklist `qmllint` invocation to
   resolve the shell's QML modules.
+- Add client-side chat threads: up to 20 in-memory threads with auto-titles,
+  per-thread drafts, rename/delete, and unread badges. The companion socket
+  stays single-turn, so switching, starting, or deleting is paused while
+  Muse is replying. Everything stays in memory, cleared on reload.
+- Add writer upgrades: Ctrl+Up/Ctrl+Down message recall (plain Up/Down while
+  the draft is single-line), a character count against the message limit,
+  slash commands (`/new`, `/stop`, `/copy`, `/help`), Ctrl+K to open chats,
+  and Ctrl+E emoji.
+- Extend rich replies from the helper: fenced code blocks (verbatim, never
+  linkified, safe for streaming partials), ordered lists, blockquotes,
+  tables, horizontal rules, and strikethrough. All markup is escaped as
+  before; QtQuick tests cover threads and the Python suite covers rendering.
 
 ### Updating the companion
 

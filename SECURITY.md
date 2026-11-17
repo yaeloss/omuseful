@@ -28,7 +28,9 @@ through a shell.
 ## How replies are shown
 
 The helper escapes all reply text, then builds a small HTML subset itself:
-bold, italic, code, bullets, headings, and links. Nothing from a reply is
+bold, italic, strikethrough, inline code, fenced code blocks, bullets,
+ordered lists, blockquotes, tables, headings, and links. Code blocks are
+verbatim and never linkified. Nothing from a reply is
 passed through as markup, so a reply cannot add images, styles, scripts, or
 anything that loads from the network. Control and bidi characters are shown
 as `\uXXXX`.
@@ -46,7 +48,7 @@ its real domain, and link cards show the domain with the end kept visible
 - Use `sudo`, `pkexec`, setuid tools, or change groups or permissions.
 - Open network connections or listeners of its own.
 - Read, accept, store, or display an SDK token or pairing secret.
-- Log or persist chat. The panel keeps at most 20 messages in memory.
+- Log or persist chat. The panel keeps at most 20 messages per thread in up to 20 threads (400 total), plus a 50-entry recall list, all in memory.
 
 The notification preference is saved by the shell, not the helper. Generic
 notification text may remain in the shell's notification history. Unread counts,

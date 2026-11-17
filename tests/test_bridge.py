@@ -335,6 +335,39 @@ def test_labelled_link_shows_its_real_domain():
     assert ">Your bank <small>(evil.example)</small></a>" in out
 
 
+def test_fenced_code_blocks_are_verbatim_and_escaped():
+    out = bridge.render_html("Before\n```python\n**not bold** https://x.example\n<script>\n```\nAfter")
+    assert "<pre><code><b>not bold" not in out  # no inline markup inside code
+    assert "**not bold** https://x.example" in out
+    assert "<a " not in out  # URLs inside code never become links
+    assert "&lt;script&gt;" in out and "<script>" not in out
+    assert "python" in out.split("<pre>")[0]  # language label, escaped
+    assert out.endswith("After")
+
+
+def test_unclosed_fence_still_closes_for_streaming_partials():
+    out = bridge.render_html("Typing\n```js\nconst a = ")
+    assert "<pre><code>const a = </code></pre>" in out
+
+
+def test_ordered_quotes_rules_and_strikethrough():
+    out = bridge.render_html("1. first\n2) second\n> quoted\n~~gone~~\n---\n")
+    assert "1. first" in out and "2. second" in out and "5. first" not in out
+    assert "&gt; quoted" in out and "<s>gone</s>" in out and "· · ·" in out
+
+
+def test_tables_render_cells_and_escape_markup():
+    out = bridge.render_html("| Name | Link |\n|---|---|\n| a | https://x.example |\n| <script> | **b** |")
+    assert "<table" in out and "<th>Name</th>" in out
+    assert '<a href="https://x.example">' in out and "<b>b</b>" in out
+    assert "<script>" not in out and "&lt;script&gt;" in out
+
+
+def test_pipe_line_without_separator_stays_text():
+    out = bridge.render_html("a | b")
+    assert "<table" not in out and "a | b" in out
+
+
 def test_links_outside_the_text_become_cards():
     cards = bridge.link_cards([
         {"url": "https://www.shop.example/item/123", "title": "Open the listing"},

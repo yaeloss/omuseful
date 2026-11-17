@@ -93,7 +93,7 @@ def visible_text(value) -> str:
 
 
 _LINK = re.compile(r"\[([^\]\n]{1,200})\]\((https?://[^\s)]{1,2048})\)|(https?://[^\s<>\"'`)\]]{1,2048})")
-_INLINE = re.compile(r"`([^`\n]{1,500})`|\*\*([^*\n]{1,500})\*\*|(?<![\w*])[*_]([^*_\n]{1,500})[*_](?![\w*])")
+_INLINE = re.compile(r"`([^`\n]{1,500})`|\*\*([^*\n]{1,500})\*\*|(?<![\w*])[*_]([^*_\n]{1,500})[*_](?![\w*])|~~([^~\n]{1,500})~~")
 _TRAILING = ".,;:!?"
 # What a browser will show as the host: letters, digits, dots, hyphens (an IDN
 # arrives as xn--...), or a bracketed IPv6 address. No backslash tricks.
@@ -145,13 +145,15 @@ def _inline(text: str) -> str:
     out, last = [], 0
     for match in _INLINE.finditer(text):
         out.append(html.escape(text[last:match.start()]))
-        code, bold, italic = match.groups()
+        code, bold, italic, strike = match.groups()
         if code is not None:
             out.append("<code>" + html.escape(code) + "</code>")
         elif bold is not None:
             out.append("<b>" + html.escape(bold) + "</b>")
-        else:
+        elif italic is not None:
             out.append("<i>" + html.escape(italic) + "</i>")
+        else:
+            out.append("<s>" + html.escape(strike) + "</s>")
         last = match.end()
     out.append(html.escape(text[last:]))
     return "".join(out)
@@ -176,22 +178,125 @@ def _line(text: str) -> str:
     return "".join(out)
 
 
+_FENCE = re.compile(r"^(`{3,}|~{3,})\s*([A-Za-z0-9_+\-]{1,20})?\s*$")
+_ORDERED = re.compile(r"^\s*(\d{1,9})[.)]\s+(.*)")
+_QUOTE = re.compile(r"^\s*>\s?(.*)")
+_HRULE = re.compile(r"^([\-*_])\s*(\1\s*){2,}$")
+_TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]*:?-{3,}[\s:|-]*\|?\s*$")
+_MAX_TABLE_ROWS = 20
+_MAX_TABLE_COLS = 10
+_MAX_CODE_LINES = 200
+
+
+def _code_block(code_lines: list[str], lang: str) -> str:
+    """Escaped fenced code. No linkifying or inline markup inside: a code
+    block is verbatim, so ```https://...``` stays literal text."""
+    body = html.escape("\n".join(code_lines[:_MAX_CODE_LINES]))
+    if lang:
+        return ("<small>" + html.escape(lang) + "</small><pre><code>"
+                + body + "</code></pre>")
+    return "<pre><code>" + body + "</code></pre>"
+
+
+def _table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return stripped.split("|")
+
+
+def _is_table_start(raw_lines: list[str], index: int) -> bool:
+    if index + 1 >= len(raw_lines):
+        return False
+    if "|" not in raw_lines[index]:
+        return False
+    separator = raw_lines[index + 1]
+    return bool(separator.strip()) and _TABLE_SEP.match(separator) and "-" in separator
+
+
+def _table_html(raw_lines: list[str], index: int) -> tuple[str, int]:
+    """Render a ```| a | b |``` header + ```|---|---|``` table.
+
+    Returns (html, next_index). Cells go through _line, so bold/links still
+    work but nothing is passed through as markup. Bounded rows/columns so a
+    huge reply cannot blow up the shell's main thread.
+    """
+    header = _table_cells(raw_lines[index])[:_MAX_TABLE_COLS]
+    rows = [[cell.strip() for cell in header]]
+    index += 2  # header + separator
+    while index < len(raw_lines) and "|" in raw_lines[index] and len(rows) < _MAX_TABLE_ROWS:
+        row = _table_cells(raw_lines[index])[:_MAX_TABLE_COLS]
+        rows.append([cell.strip() for cell in row])
+        index += 1
+    parts = ['<table border="1" cellspacing="0" cellpadding="4">']
+    for row_no, row in enumerate(rows):
+        tag = "th" if row_no == 0 else "td"
+        cells = "".join("<" + tag + ">" + _line(cell) + "</" + tag + ">"
+                        for cell in row) or "<" + tag + "></" + tag + ">"
+        parts.append("<tr>" + cells + "</tr>")
+    parts.append("</table>")
+    return "".join(parts), index
+
+
 def render_html(text: str) -> str:
-    """A small, fully escaped HTML subset for a Muse reply: bold, italic, code,
-    bullets, line breaks, and http(s) links. Nothing from the reply is passed
-    through as markup, so it cannot add images, styles, or scripts."""
-    lines = []
-    for raw in str(text).split("\n"):
+    """A small, fully escaped HTML subset for a Muse reply: bold, italic,
+    strikethrough, inline code, bullets, ordered lists, blockquotes, headings,
+    tables, fenced code blocks, and http(s) links. Nothing from the reply is
+    passed through as markup, so it cannot add images, styles, or scripts.
+    Code blocks are verbatim and never linkified. An unclosed fence (a
+    streaming partial) still renders as a complete code block."""
+    raw_lines = str(text).split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(raw_lines):
+        raw = raw_lines[index]
+        if not out and raw == "":
+            index += 1
+            continue
         stripped = raw.lstrip()
+        fence = _FENCE.match(stripped) if stripped[:3] in ("```", "~~~") else None
+        if fence:
+            marker = fence.group(1)
+            lang = fence.group(2) or ""
+            char = marker[0]
+            width = len(marker)
+            code_lines: list[str] = []
+            index += 1
+            while index < len(raw_lines):
+                line = raw_lines[index]
+                closing = _FENCE.match(line.lstrip()) if line.lstrip()[:3] in ("```", "~~~") else None
+                if closing and closing.group(1)[0] == char and len(closing.group(1)) >= width:
+                    index += 1
+                    break
+                code_lines.append(line)
+                index += 1
+            out.append(_code_block(code_lines, lang))
+            continue
+        if _is_table_start(raw_lines, index):
+            table_html, index = _table_html(raw_lines, index)
+            out.append(table_html)
+            continue
         heading = re.match(r"#{1,6}\s+(.*)", stripped)
         bullet = re.match(r"[-*•]\s+(.*)", stripped)
+        ordered = _ORDERED.match(raw)
+        quote = _QUOTE.match(raw)
         if heading:
-            lines.append("<b>" + _line(heading.group(1)) + "</b>")
+            out.append("<b>" + _line(heading.group(1)) + "</b>")
         elif bullet:
-            lines.append("&nbsp;&nbsp;• " + _line(bullet.group(1)))
+            out.append("&nbsp;&nbsp;• " + _line(bullet.group(1)))
+        elif ordered:
+            out.append("&nbsp;&nbsp;" + html.escape(ordered.group(1) + ".")
+                       + " " + _line(ordered.group(2)))
+        elif quote:
+            out.append("&nbsp;&nbsp;&gt; " + _line(quote.group(1)))
+        elif _HRULE.match(stripped):
+            out.append("&nbsp;&nbsp;· · ·")
         else:
-            lines.append(_line(raw))
-    return "<br>".join(lines)
+            out.append(_line(raw))
+        index += 1
+    return "<br>".join(out)
 
 
 def link_cards(raw, text: str = "") -> list[dict]:
